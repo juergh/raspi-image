@@ -1,0 +1,248 @@
+#!/bin/bash -eu
+#
+# Build and manipulate a raspberry pi image
+#
+
+function out()
+{
+	local rc=${?}
+
+	trap - INT TERM EXIT HUP
+
+	if [ "${rc}" -ne 0 ] ; then
+		pr_error "Script failed"
+	fi
+
+	exit "${rc}"
+}
+
+function pr_info()
+{
+    echo -e "\033[33m${*}\033[0m"
+
+}
+
+function pr_debug()
+{
+    [ "${DEBUG}" -eq 0 ] || echo -e "\033[36m${*}\033[0m"
+
+}
+
+function pr_error()
+{
+    echo -e "\033[31mError: ${*}\033[0m" >&2
+	exit 1
+
+}
+
+function align()
+{
+	local val=${1} align=${2}
+
+	echo $(($((val / align + 1)) * align))
+}
+
+function probe_part()
+{
+	local dev=${1}
+	local line num start size ptype
+
+	while IFS= read -r line ; do
+		num=${line#${dev}}
+		num=${num%% *}
+
+		start=${line#* start=}
+		start=${start%%, *}
+		start=${start##* }
+
+		size=${line#* size=}
+		size=${size%%, *}
+		size=${size##* }
+
+		ptype=${line#* type=}
+		ptype=${ptype%%, *}
+		ptype=${ptype##* }
+
+		echo "${num} ${start} ${size} ${ptype}"
+	done < <(sfdisk -d "${dev}" | grep -P "^${dev}[0-9]+ ")
+}
+
+function copy_part()
+{
+	local src_dev=${1} src_num=${2} dst_dev=${3} dst_num=${4}
+	local dev_size img_parts img_part1 img_part2
+	local part1_start part1_size part1_type part2_start part2_size part2_type
+	local part5_start part5_size part5_type part6_start part6_size part6_type
+
+	pr_info "Copying partition ${src_dev}:${src_num} to ${dst_dev}:${dst_num}"
+
+	# Get the partition information from the source and destination devices
+	IFS=' ' read -r -a src_part < <(probe_part "${src_dev}" | \
+										grep "^${src_num} ")
+	IFS=' ' read -r -a dst_part < <(probe_part "${dst_dev}" | \
+										grep "^${dst_num} ")
+	pr_debug "src_part: ${src_part[*]}"
+	pr_debug "dst_part: ${dst_part[*]}"
+
+	# Check the size of the destinations partition
+	if [ "${dst_part[2]}" -lt "${src_part[2]}" ] ; then
+		pr_error "Destination partition is too small"
+	fi
+
+	# Copy the partition
+	dd bs=512 if="${src_dev}" skip="${src_part[1]}" count="${src_part[2]}" \
+	   of="${dst_dev}" seek="${dst_part[1]}" conv=notrunc
+}
+
+function init_dev()
+{
+	local dev=${1} image=${2}
+	local dev_size img_parts img_part1 img_part2
+	local part1_start part1_size part1_type part2_start part2_size part2_type
+	local part5_start part5_size part5_type part6_start part6_size part6_type
+
+	pr_info "Initializing device ${dev}"
+
+	# Get the size of the device (in #sectors)
+	dev_size=$(sfdisk -s "${dev}")
+	[ -n "${dev_size}" ]
+	dev_size=$((dev_size * 1024 / 512))
+	pr_debug "dev_size: ${dev_size}"
+
+	# Get the partition information from the image file
+	readarray -t img_parts < <(probe_part "${image}")
+	IFS=' ' read -r -a img_part1 <<< "${img_parts[0]}"
+	IFS=' ' read -r -a img_part2 <<< "${img_parts[1]}"
+	pr_debug "img_part1: ${img_part1[*]}"
+	pr_debug "img_part2: ${img_part2[*]}"
+
+	# The (custom/multiboot) boot partition
+	part1_start=2048
+	part1_size=${img_part1[2]}
+	part1_type=${img_part1[3]}
+	pr_debug "part1: start ${part1_start}, size ${part1_size}," \
+			 "type ${part1_type}"
+
+	# The extended partition
+	part2_start=$((part1_start + part1_size))
+	part2_size=$((dev_size - part2_start))
+	part2_type=5
+	pr_debug "part2: start ${part2_start}, size ${part2_size}," \
+			 "type ${part2_type}"
+
+	# The raspbian boot partition
+	part5_start=$(align "${part2_start}" 2048)
+	part5_size=${img_part1[2]}
+	part5_type=${img_part1[3]}
+	pr_debug "part5: start ${part5_start}, size ${part5_size}," \
+			 "type ${part5_type}"
+
+	# The raspbian rootfs partition
+	part6_start=$((part5_start + part5_size))
+	part6_size=$((3 * 1024 * 1024 * 1024 / 512))  # 3GB fixed size
+	part6_type=${img_part2[3]}
+	pr_debug "part6: start ${part6_start}, size ${part6_size}," \
+			 "type ${part6_type}"
+
+	# Create the input file for sfdisk
+	cat <<EOF >sfdisk.in
+label: dos
+label-id: 0xdeadbeef
+device: ${dev}
+unit: sectors
+
+${dev}1 : start=${part1_start}, size=${part1_size}, type=${part1_type}, bootable
+${dev}2 : start=${part2_start}, size=${part2_size}, type=${part2_type}
+${dev}5 : start=${part5_start}, size=${part5_size}, type=${part5_type}
+${dev}6 : start=${part6_start}, size=${part6_size}, type=${part6_type}
+EOF
+
+	# Wipe and partition the device
+	pr_info "Partitioning device ${dev}"
+	wipefs -a -f "${dev}"
+	if [ "${DEBUG}" -eq 1 ] ; then
+		sfdisk "${dev}" < sfdisk.in
+	else
+		sfdisk -q "${dev}" < sfdisk.in
+		sfdisk -l "${dev}"
+	fi
+
+	# Copy the partitions from the raspbian image to the device
+	copy_part "${image}" 1 "${dev}" 1
+	copy_part "${image}" 1 "${dev}" 5
+	copy_part "${image}" 2 "${dev}" 6
+}
+
+# -----------------------------------------------------------------------------
+# Commands
+
+function do_init()
+{
+	if [ $# -ne 2 ] ; then
+		usage
+		exit 2
+	fi
+
+	local dev=${1} image=${2}
+
+	init_dev "${dev}" "${image}"
+}
+
+function usage()
+{
+	trap - EXIT INT TERM HUP
+
+	cat <<EOF
+Usage: raspi-image [-d] [-h] COMMAND [OPTIONS]
+
+Supported commands
+  init DEVICE OS_IMAGE
+               Build a base image on device <DEVICE> using the image
+               <OS_IMAGE>.
+
+Positional arguments:
+  -d, --debug  Enable debugging output.
+  -h, --help   Show this help text and exit.
+EOF
+}
+
+DEBUG=0
+cmd=
+cmd_opts=()
+
+while [ $# -gt 0 ] ; do
+	case "${1}" in
+		-d|--debug)
+			DEBUG=1
+			;;
+		-h|--help)
+			usage
+			exit
+			;;
+		-*)
+			pr_error "Unexpected argument: ${1}"
+			;;
+		*)
+			cmd=${1}
+			shift
+			cmd_opts=("${@}")
+			break
+	esac
+	shift
+done
+
+case "${cmd}" in
+	init)
+		true
+		;;
+	*)
+		usage
+		exit 2
+		;;
+esac
+
+MAP_IMAGE=
+MOUNT_POINT=
+trap out EXIT INT TERM HUP
+
+"do_${cmd}" "${cmd_opts[@]}"
