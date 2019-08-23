@@ -1,6 +1,6 @@
 #!/bin/bash -eu
 #
-# Build and manipulate a raspberry pi image
+# Build and manipulate a Raspberry Pi image
 #
 
 function out()
@@ -67,31 +67,47 @@ function probe_part()
 	done < <(sfdisk -d "${dev}" | grep -P "^${dev}[0-9]+ ")
 }
 
-function copy_part()
+function dd_device()
 {
-	local src_dev=${1} src_num=${2} dst_dev=${3} dst_num=${4}
-	local dev_size img_parts img_part1 img_part2
-	local part1_start part1_size part1_type part2_start part2_size part2_type
-	local part5_start part5_size part5_type part6_start part6_size part6_type
+	local src dst dd_opts src_part dst_part
 
-	pr_info "Copying partition ${src_dev}:${src_num} to ${dst_dev}:${dst_num}"
+	IFS=':' read -r -a src <<< "${1}"
+	IFS=':' read -r -a dst <<< "${2}"
 
-	# Get the partition information from the source and destination devices
-	IFS=' ' read -r -a src_part < <(probe_part "${src_dev}" | \
-										grep "^${src_num} ")
-	IFS=' ' read -r -a dst_part < <(probe_part "${dst_dev}" | \
-										grep "^${dst_num} ")
-	pr_debug "src_part: ${src_part[*]}"
-	pr_debug "dst_part: ${dst_part[*]}"
+	pr_info "Copying device/partition ${src} to ${dst}"
 
-	# Check the size of the destinations partition
-	if [ "${dst_part[2]}" -lt "${src_part[2]}" ] ; then
+	src_part=()
+	dst_part=()
+	dd_opts=("if=${src[0]}" "of=${dst[0]}" "bs=512" "conv=notrunc")
+
+	pr_debug "src: ${src[*]}"
+	if [ "${#src[@]}" -eq 2 ] ; then
+		# Source partition number specified, get the partition details
+		IFS=' ' read -r -a src_part < <(probe_part "${src[0]}" | \
+											grep "^${src[1]} ")
+		pr_debug "src_part: ${src_part[*]}"
+		dd_opts+=("skip=${src_part[1]}" "count=${src_part[2]}")
+	fi
+
+	pr_debug "dst: ${dst[*]}"
+	if [ "${#dst[@]}" -eq 2 ] ; then
+		# Destination partition number specified, get the partition details
+		IFS=' ' read -r -a dst_part < <(probe_part "${dst[0]}" | \
+											grep "^${dst[1]} ")
+		pr_debug "dst_part: ${dst_part[*]}"
+		dd_opts+=("seek=${dst_part[1]}")
+	fi
+
+	pr_debug "dd_opts: ${dd_opts[*]}"
+
+	# Check the size of the destination partition
+	if [ "${#src_part[@]}" -gt 1 ] && [ "${#dst_part[@]}" -gt 1 ] && \
+		   [ "${dst_part[2]}" -lt "${src_part[2]}" ] ; then
 		pr_error "Destination partition is too small"
 	fi
 
 	# Copy the partition
-	dd bs=512 if="${src_dev}" skip="${src_part[1]}" count="${src_part[2]}" \
-	   of="${dst_dev}" seek="${dst_part[1]}" conv=notrunc
+	dd "${dd_opts[@]}"
 }
 
 function init_dev()
@@ -168,9 +184,9 @@ EOF
 	fi
 
 	# Copy the partitions from the raspbian image to the device
-	copy_part "${image}" 1 "${dev}" 1
-	copy_part "${image}" 1 "${dev}" 5
-	copy_part "${image}" 2 "${dev}" 6
+	dd_device "${image}:1" "${dev}:1"
+	dd_device "${image}:1" "${dev}:5"
+	dd_device "${image}:2" "${dev}:6"
 }
 
 # -----------------------------------------------------------------------------
@@ -183,9 +199,17 @@ function do_init()
 		exit 2
 	fi
 
-	local dev=${1} image=${2}
+	init_dev "${@}"
+}
 
-	init_dev "${dev}" "${image}"
+function do_dd()
+{
+	if [ $# -ne 2 ] ; then
+		usage
+		exit 2
+	fi
+
+	dd_device "${@}"
 }
 
 function usage()
@@ -199,6 +223,9 @@ Supported commands
   init DEVICE OS_IMAGE
                Build a base image on device <DEVICE> using the image
                <OS_IMAGE>.
+  dd DEVICE1[:PARTITION1] DEVICE2[:PARTITION2]
+               Copy DEVICE1 to DEVICE2 using 'dd'. Operate on a partition
+               rather than a whole device if a PARTITIION number is specified.
 
 Positional arguments:
   -d, --debug  Enable debugging output.
@@ -232,7 +259,7 @@ while [ $# -gt 0 ] ; do
 done
 
 case "${cmd}" in
-	init)
+	init|dd)
 		true
 		;;
 	*)
@@ -241,8 +268,6 @@ case "${cmd}" in
 		;;
 esac
 
-MAP_IMAGE=
-MOUNT_POINT=
 trap out EXIT INT TERM HUP
 
 "do_${cmd}" "${cmd_opts[@]}"
