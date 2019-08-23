@@ -75,7 +75,7 @@ function probe_part()
 	done < <(sfdisk -d "${dev}" | grep -P "^${dev}[0-9]+ ")
 }
 
-function dd_device()
+function dd_dev()
 {
 	local src dst dd_opts src_part dst_part
 
@@ -198,9 +198,9 @@ EOF
 	fi
 
 	# Copy the partitions from the raspbian image to the device
-	dd_device "${image}:1" "${dev}:1"
-	dd_device "${image}:1" "${dev}:5"
-	dd_device "${image}:2" "${dev}:6"
+	dd_dev "${image}:1" "${dev}:1"
+	dd_dev "${image}:1" "${dev}:5"
+	dd_dev "${image}:2" "${dev}:6"
 }
 
 # -----------------------------------------------------------------------------
@@ -223,7 +223,7 @@ function do_dd()
 		exit 2
 	fi
 
-	dd_device "${@}"
+	dd_dev "${@}"
 }
 
 function usage()
