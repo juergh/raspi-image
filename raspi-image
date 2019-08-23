@@ -16,6 +16,14 @@ function out()
 	exit "${rc}"
 }
 
+function dry_run_exit()
+{
+	if [ "${DRY_RUN}" -eq 1 ] ; then
+		pr_info "Dry-run, exiting..."
+		exit
+	fi
+}
+
 function pr_info()
 {
     echo -e "\033[33m${*}\033[0m"
@@ -106,6 +114,9 @@ function dd_device()
 		pr_error "Destination partition is too small"
 	fi
 
+	# Exit if this is a dry-run
+	dry_run_exit
+
 	# Copy the partition
 	dd "${dd_opts[@]}"
 }
@@ -173,6 +184,9 @@ ${dev}5 : start=${part5_start}, size=${part5_size}, type=${part5_type}
 ${dev}6 : start=${part6_start}, size=${part6_size}, type=${part6_type}
 EOF
 
+	# Exit if this is a dry-run
+	dry_run_exit
+
 	# Wipe and partition the device
 	pr_info "Partitioning device ${dev}"
 	wipefs -a -f "${dev}"
@@ -217,23 +231,27 @@ function usage()
 	trap - EXIT INT TERM HUP
 
 	cat <<EOF
-Usage: raspi-image [-d] [-h] COMMAND [OPTIONS]
+Usage: raspi-image [-d] [-h] [r] COMMAND [OPTIONS]
 
 Supported commands
   init DEVICE OS_IMAGE
-               Build a base image on device <DEVICE> using the image
-               <OS_IMAGE>.
+                 Build a base image on device <DEVICE> using the image
+                 <OS_IMAGE>.
   dd DEVICE1[:PARTITION1] DEVICE2[:PARTITION2]
-               Copy DEVICE1 to DEVICE2 using 'dd'. Operate on a partition
-               rather than a whole device if a PARTITIION number is specified.
+                 Copy DEVICE1 to DEVICE2 using 'dd'. Operate on a partition
+                 rather than a whole device if a PARTITIION number is
+                 specified.
 
 Positional arguments:
-  -d, --debug  Enable debugging output.
-  -h, --help   Show this help text and exit.
+  -d, --debug    Enable debugging output.
+  -h, --help     Show this help text and exit.
+  -r, --dry-run  Dry run mode. If specified, no modifcations of a device/image
+                 are made.
 EOF
 }
 
 DEBUG=0
+DRY_RUN=0
 cmd=
 cmd_opts=()
 
@@ -245,6 +263,9 @@ while [ $# -gt 0 ] ; do
 		-h|--help)
 			usage
 			exit
+			;;
+		-r|--dry-run)
+			DRY_RUN=1
 			;;
 		-*)
 			pr_error "Unexpected argument: ${1}"
