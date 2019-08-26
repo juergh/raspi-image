@@ -1,4 +1,4 @@
-kernel=uboot2.bin
+kernel=uboot_2.bin
 dtparam=audio=on
 
 [pi4]

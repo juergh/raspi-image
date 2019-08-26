@@ -1,0 +1,40 @@
+#!/bin/bash -eu
+#
+# Build u-boot for Raspberry Pi
+#
+
+function build_uboot()
+{
+	local model=${1}
+
+	case "${model}" in
+		rpi_2)
+			export CROSS_COMPILE=arm-linux-gnueabihf-
+			;;
+		rpi_3)
+			export CROSS_COMPILE=aarch64-linux-gnu-
+			;;
+		*)
+			echo "Invalid model ${model}" >&2
+			exit 1
+	esac
+
+	make distclean
+	cp ../boot/"uboot_${model}_config" .config
+	make -j"$(nproc --all)"
+	cp u-boot.bin ../boot/"uboot_${model#rpi_}.bin"
+}
+
+VERSION=v2019.07
+
+if ! [ -d u-boot ] ; then
+	git clone --branch "${VERSION}" git://git.denx.de/u-boot.git u-boot
+	cd u-boot
+else
+	cd u-boot
+	git clean -xf
+	git checkout "${VERSION}"
+fi
+
+build_uboot rpi_2
+build_uboot rpi_3
