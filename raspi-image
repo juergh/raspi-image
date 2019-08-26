@@ -200,10 +200,17 @@ function dd_dev()
 function config_dev()
 {
 	local dev=${1}
-	local mountpoint
+	local script mountpoint
 
 	# Unmount all partitions (just in case)
 	umount_dev_all "${dev}"
+
+	# Compile all u-boot scripts
+	while IFS= read -r script ; do
+		pr_info "Building u-boot script ${script}"
+        mkimage -A arm -T script -C none -n 'u-boot script' -d "${script}" \
+				"${script%.txt}"
+	done < <(find boot/ -name '*.scr.txt')
 
 	# Create a temporary mount point
 	MOUNTPOINT=$(mktemp -d --tmpdir raspi-image-XXXXXX)
@@ -214,9 +221,8 @@ function config_dev()
 	mount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
 	pr_info "Copying files to the boot partition ${MOUNTDEV}"
 
-	cp boot/config.txt boot/boot.scr "${MOUNTPOINT}"/
-	cp boot/uboot_raspi2.bin "${MOUNTPOINT}"/uboot2.bin
-	rm -f "${MOUNTPOINT}"/uboot*.env
+	rm -f "${MOUNTPOINT}"/uboot_*.env "${MOUNTPOINT}"/*.img
+	cp boot/config.txt boot/boot.scr boot/uboot_*.bin "${MOUNTPOINT}"/
 
 	umount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
 
