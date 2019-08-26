@@ -50,30 +50,14 @@ function align()
 	echo $(($((val / align + 1)) * align))
 }
 
-# TODO: Use partx -o START,END,.... instead of sfdisk
 function probe_dev()
 {
 	local dev=${1}
-	local line num start size ptype
+	local nr start size ptype
 
-	while IFS= read -r line ; do
-		num=${line#${dev}}
-		num=${num%% *}
-
-		start=${line#* start=}
-		start=${start%%, *}
-		start=${start##* }
-
-		size=${line#* size=}
-		size=${size%%, *}
-		size=${size##* }
-
-		ptype=${line#* type=}
-		ptype=${ptype%%, *}
-		ptype=${ptype##* }
-
-		echo "${num} ${start} ${size} ${ptype}"
-	done < <(sfdisk -d "${dev}" | grep -P "^${dev}[0-9]+ ")
+	while IFS=' ' read -r nr start size ptype ; do
+		echo "${nr} ${start} ${size} ${ptype#0x}"
+	done < <(partx -g -o NR,START,SECTORS,TYPE "${dev}")
 }
 
 function umount_dev()
@@ -182,14 +166,14 @@ function init_dev()
 	pr_debug "part2: start ${part2_start}, size ${part2_size}," \
 			 "type ${part2_type}"
 
-	# The raspbian boot partition
+	# The Raspbian boot partition
 	part5_start=$(align "${part2_start}" 2048)
 	part5_size=${img_part1[2]}
 	part5_type=${img_part1[3]}
 	pr_debug "part5: start ${part5_start}, size ${part5_size}," \
 			 "type ${part5_type}"
 
-	# The raspbian rootfs partition
+	# The Raspbian rootfs partition
 	part6_start=$((part5_start + part5_size))
 	part6_size=$((3 * 1024 * 1024 * 1024 / 512))  # 3GB fixed size
 	part6_type=${img_part2[3]}
@@ -233,7 +217,7 @@ EOF
 		partx -u "${dev}"
 	fi
 
-	# Copy the partitions from the raspbian image to the device
+	# Copy the partitions from the Raspbian image to the device
 	dd_dev "${image}:1" "${dev}:1"
 	dd_dev "${image}:1" "${dev}:5"
 	dd_dev "${image}:2" "${dev}:6"
@@ -270,9 +254,9 @@ function usage()
 Usage: raspi-image [-d] [-h] [r] COMMAND [OPTIONS]
 
 Supported commands
-  init DEVICE OS_IMAGE
-                 Build a base image on device <DEVICE> using the image
-                 <OS_IMAGE>.
+  init DEVICE RASPBIAN_IMAGE
+                 Initialize the device <DEVICE> using the Raspbian image
+                 <RASPBIAN_IMAGE>.
   dd DEVICE1[:PARTITION1] DEVICE2[:PARTITION2]
                  Copy DEVICE1 to DEVICE2 using 'dd'. Operate on a partition
                  rather than a whole device if a PARTITIION number is
