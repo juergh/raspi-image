@@ -9,7 +9,14 @@ function out()
 
 	trap - INT TERM EXIT HUP
 
+	if [ -n "${MOUNTDEV}" ] && [ -n "${MOUNTPOINT}" ] ; then
+		# Unmount any device that's still mounted
+		umount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
+		rmdir "${MOUNTPOINT}"
+	fi
+
 	if [ "${rc}" -ne 0 ] ; then
+		# Emit a message if the script failed
 		pr_error "Script failed"
 	fi
 
@@ -92,7 +99,9 @@ function mount_dev()
 
 	if [ -f "${dev[0]}" ] ; then
 		# It's an image file, so run partx -a (add)
+		pr_info "Adding partition ${1}"
 		loopdev=$(partx_add_dev "${1}")
+		pr_debug "loopdev: ${loopdev}"
 		part=${loopdev}p${dev[1]}
 	else
 		part=${dev[0]}${dev[1]}
@@ -105,14 +114,15 @@ function umount_dev()
 {
 	local dev mountpoint
 
-	pr_info "Unounting ${1}"
+	pr_info "Unmounting ${1}"
 
 	IFS=':' read -r -a dev <<< "${1}"
 	mountpoint=${2}
 
-	mount "${mountpoint}" || umount -l "${mountpoint}"
+	umount "${mountpoint}" || umount -l "${mountpoint}"
 
 	if [ -f "${dev[0]}" ] ; then
+		pr_info "Deleting partition ${1}"
 		# It's a image file, so run partx -d (delete)
 		partx_del_dev "${1}"
 	fi
@@ -128,7 +138,7 @@ function umount_dev_all()
 		return
 	fi
 
-	pr_info "Unmounting ${dev} partition(s)"
+	pr_info "Unmounting all partitions of ${dev}"
 
 	# Unmount all partitions of the device
 	while IFS= read -r mountpoint ; do
@@ -185,6 +195,64 @@ function dd_dev()
 
 	# Copy the partition
 	dd "${dd_opts[@]}"
+}
+
+function config_dev()
+{
+	local dev=${1}
+	local mountpoint
+
+	# Unmount all partitions (just in case)
+	umount_dev_all "${dev}"
+
+	# Create a temporary mount point
+	MOUNTPOINT=$(mktemp -d --tmpdir raspi-image-XXXXXX)
+	pr_debug "MOUNTPOINT: ${MOUNTPOINT}"
+
+	# Configure the boot partition (partition 1)
+	MOUNTDEV=${dev}:1
+	mount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
+	pr_info "Copying files to the boot partition ${MOUNTDEV}"
+
+	cp boot/config.txt boot/boot.scr "${MOUNTPOINT}"/
+	cp boot/uboot_raspi2.bin "${MOUNTPOINT}"/uboot2.bin
+	rm -f "${MOUNTPOINT}"/uboot*.env
+
+	umount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
+
+	# Configure the Raspbian boot partition (partition 5)
+	MOUNTDEV=${dev}:5
+	mount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
+	pr_info "Copying files to the Raspbian boot partition ${MOUNTDEV}"
+
+	cp boot/raspbian/boot.scr "${MOUNTPOINT}"/
+
+	umount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
+
+	# Fix up the Raspbian rootfs partition (partition 6)
+	MOUNTDEV=${dev}:6
+	mount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
+	pr_info "Fixing up the Raspbian rootfs partition ${MOUNTDEV}"
+
+	# Make sure nobody can call init_resize.sh since it would mess up our
+	# partition table
+	if [ -e "${MOUNTPOINT}"/usr/lib/raspi-config/init_resize.sh ] ; then
+		mv "${MOUNTPOINT}"/usr/lib/raspi-config/init_resize.sh \
+		   "${MOUNTPOINT}"/usr/lib/raspi-config/init_resize.sh.bak
+	fi
+
+	# Fix the UUIDs of the boot and rootfs partitions
+	sed -i 's,PARTUUID=[0-9a-f]*-01,PARTUUID=deadbeef-05,' \
+		"${MOUNTPOINT}"/etc/fstab
+	sed -i 's,PARTUUID=[0-9a-f]*-02,PARTUUID=deadbeef-06,' \
+		"${MOUNTPOINT}"/etc/fstab
+
+	umount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
+
+	# Cleanup
+	rmdir "${MOUNTPOINT}" || true
+	MOUNTDEV=
+	MOUNTPOINT=
 }
 
 function init_dev()
@@ -293,6 +361,16 @@ function do_init()
 	init_dev "${@}"
 }
 
+function do_config()
+{
+	if [ $# -ne 1 ] ; then
+		usage
+		exit 2
+	fi
+
+	config_dev "${@}"
+}
+
 function do_dd()
 {
 	if [ $# -ne 2 ] ; then
@@ -314,6 +392,8 @@ Supported commands
   init DEVICE RASPBIAN_IMAGE
                  Initialize the device <DEVICE> using the Raspbian image
                  <RASPBIAN_IMAGE>.
+  config DEVICE
+                 Configure the already initialized device DEVICE.
   dd DEVICE1[:PARTITION1] DEVICE2[:PARTITION2]
                  Copy DEVICE1 to DEVICE2 using 'dd'. Operate on a partition
                  rather than a whole device if a PARTITIION number is
@@ -357,7 +437,7 @@ while [ $# -gt 0 ] ; do
 done
 
 case "${cmd}" in
-	init|dd)
+	init|config|dd)
 		true
 		;;
 	*)
