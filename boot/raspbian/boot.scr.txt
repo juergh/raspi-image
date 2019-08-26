@@ -1,0 +1,8 @@
+# -*- shell-script -*-
+
+fatload mmc 0:5 ${kernel_addr_r} kernel7l.img
+
+# setenv bootargs coherent_pool=1M bcm2708_fb.fbwidth=1280 bcm2708_fb.fbheight=1024 bcm2708_fb.fbswap=1 vc_mem.mem_base=0x3ec00000 vc_mem.mem_size=0x40000000  dwc_otg.lpm_enable=0 console=ttyAMA0,115200 console=tty1 root=PARTUUID=deadbeef-06 rootfstype=ext4 elevator=deadline fsck.repair=yes rootwait
+setenv bootargs coherent_pool=1M bcm2708_fb.fbwidth=1280 bcm2708_fb.fbheight=1024 bcm2708_fb.fbswap=1 vc_mem.mem_base=0x3ec00000 vc_mem.mem_size=0x40000000  dwc_otg.lpm_enable=0 console=ttyAMA0,115200 root=PARTUUID=deadbeef-06 rootfstype=ext4 elevator=deadline fsck.repair=yes rootwait
+
+bootz ${kernel_addr_r} - ${fdt_addr}

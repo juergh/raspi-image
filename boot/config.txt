@@ -1,0 +1,8 @@
+kernel=uboot2.bin
+dtparam=audio=on
+
+[pi4]
+dtoverlay=vc4-fkms-v3d
+max_framebuffers=2
+
+[all]

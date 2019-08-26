@@ -1,0 +1,36 @@
+# -*- shell-script -*-
+#
+# U-Boot boot script
+#
+
+# The titles of the boot menu entries
+setenv x_title0 "Raspberry"
+#setenv x_title1
+#setenv x_title2
+#setenv x_title3
+#setenv x_title4
+
+# First-boot initialization
+if env exists x_bootnum; then true; else setenv x_bootnum 0; setenv bootcmd "run bootcmd_mmc0"; saveenv; fi
+
+# This is the actual boot command
+setenv x_boot 'setexpr partnum ${x_bootnum} * 2; setexpr partnum ${partnum} + 5; echo Booting from mmc 0:${partnum}...; fatload mmc 0:${partnum} ${scriptaddr} boot.scr; source ${scriptaddr}'
+
+# Set the defult bootmenu entry
+setenv bootmenu_default ${x_bootnum}
+
+# Set the boot menu entries
+setenv bootmenu_0 "${x_title0}=setenv x_bootnum 0; echo Booting ${x_title0}...; run x_boot"
+setenv bootmenu_1 "${x_title1}=setenv x_bootnum 1; echo Booting ${x_title1}...; run x_boot"
+setenv bootmenu_2 "${x_title2}=setenv x_bootnum 2; echo Booting ${x_title2}...; run x_boot"
+setenv bootmenu_3 "${x_title3}=setenv x_bootnum 3; echo Booting ${x_title3}...; run x_boot"
+setenv bootmenu_4 "${x_title4}=setenv x_bootnum 4; echo Booting ${x_title4}...; run x_boot"
+
+# Clear the entries that don't have titles defined and add a 'Reset board'
+# entry as the last menu entry
+last=-1
+for n in 0 1 2 3 5; do if env exists x_title${n}; then true; else env delete bootmenu_${n}; if test ${last} -eq -1; then last=${n}; fi; fi; done
+setenv bootmenu_${last} "Reset board=reset"
+
+# Display the bootmenu
+bootmenu 5
