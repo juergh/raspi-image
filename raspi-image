@@ -60,10 +60,68 @@ function probe_dev()
 	done < <(partx -g -o NR,START,SECTORS,TYPE "${dev}")
 }
 
+function partx_add_dev()
+{
+	local dev
+
+	IFS=':' read -r -a dev <<< "${1}"
+
+	# Add the specified partition and print the loop device /dev/loopX
+	partx -v -a -n "${dev[1]}" "${dev[0]}" | \
+		grep "partition #${dev[1]} added" | sed 's,:.*,,'
+}
+
+function partx_del_dev()
+{
+	local dev
+
+	IFS=':' read -r -a dev <<< "${1}"
+
+	# Delete the specified partition
+	partx -v -d -n "${dev[1]}" "${dev[0]}"
+}
+
+function mount_dev()
+{
+	local dev mountpoint loopdev part
+
+	pr_info "Mounting ${1}"
+
+	IFS=':' read -r -a dev <<< "${1}"
+	mountpoint=${2}
+
+	if [ -f "${dev[0]}" ] ; then
+		# It's an image file, so run partx -a (add)
+		loopdev=$(partx_add_dev "${1}")
+		part=${loopdev}p${dev[1]}
+	else
+		part=${dev[0]}${dev[1]}
+	fi
+
+	mount "${part}" "${mountpoint}"
+}
+
 function umount_dev()
 {
+	local dev mountpoint
+
+	pr_info "Unounting ${1}"
+
+	IFS=':' read -r -a dev <<< "${1}"
+	mountpoint=${2}
+
+	mount "${mountpoint}" || umount -l "${mountpoint}"
+
+	if [ -f "${dev[0]}" ] ; then
+		# It's a image file, so run partx -d (delete)
+		partx_del_dev "${1}"
+	fi
+}
+
+function umount_dev_all()
+{
 	local dev=${1}
-	local mountp
+	local mountpoint
 
 	if ! [ -b "${dev}" ] ; then
 		# Not a block device, nothing to do
@@ -73,10 +131,9 @@ function umount_dev()
 	pr_info "Unmounting ${dev} partition(s)"
 
 	# Unmount all partitions of the device
-	# shellcheck disable=SC2034
-	while IFS= read -r mountp ; do
-		if [ -n "${mountp}" ] && [ -d "${mountp}" ] ; then
-			umount "${mountp}" || umount -l "${mountp}" || true
+	while IFS= read -r mountpoint ; do
+		if [ -n "${mountpoint}" ] && [ -d "${mountpoint}" ] ; then
+			umount "${mountpoint}" || umount -l "${mountpoint}"
 		fi
 	done < <(lsblk -n -o MOUNTPOINT "${dev}")
 }
@@ -123,8 +180,8 @@ function dd_dev()
 	# Exit if this is a dry-run
 	dry_run_exit
 
-	# Unmount the partitions (just in case)
-	umount_dev "${dst[0]}"
+	# Unmount all partitions (just in case)
+	umount_dev_all "${dst[0]}"
 
 	# Copy the partition
 	dd "${dd_opts[@]}"
@@ -199,8 +256,8 @@ EOF
 	fi
 	dry_run_exit
 
-	# Unmount the partitions (just in case)
-	umount_dev "${dev}"
+	# Unmount all partitions (just in case)
+	umount_dev_all "${dev}"
 
 	# Wipe and partition the device
 	pr_info "Partitioning device ${dev}"
