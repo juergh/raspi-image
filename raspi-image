@@ -63,7 +63,7 @@ function probe_dev()
 function umount_dev()
 {
 	local dev=${1}
-	local tmp mountp
+	local mountp
 
 	if ! [ -b "${dev}" ] ; then
 		# Not a block device, nothing to do
@@ -74,11 +74,11 @@ function umount_dev()
 
 	# Unmount all partitions of the device
 	# shellcheck disable=SC2034
-	while IFS=' ' read -r tmp tmp tmp tmp tmp tmp mountp ; do
+	while IFS= read -r mountp ; do
 		if [ -n "${mountp}" ] && [ -d "${mountp}" ] ; then
 			umount "${mountp}" || umount -l "${mountp}" || true
 		fi
-	done < <(lsblk -n -l "${dev}")
+	done < <(lsblk -n -o MOUNTPOINT "${dev}")
 }
 
 function dd_dev()
