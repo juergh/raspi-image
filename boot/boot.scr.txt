@@ -4,7 +4,7 @@
 #
 
 # The titles of the boot menu entries
-setenv x_title0 "Raspberry"
+#setenv x_title0
 #setenv x_title1
 #setenv x_title2
 #setenv x_title3
