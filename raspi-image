@@ -128,24 +128,229 @@ function umount_dev()
 	fi
 }
 
-function umount_dev_all()
+function sfdisk_dev()
 {
-	local dev=${1}
-	local mountpoint
+	local dev=${1} sfdisk_in=${2}
 
-	if ! [ -b "${dev}" ] ; then
-		# Not a block device, nothing to do
-		return
+	# Exit if this is a dry-run
+	if [ "${DRY_RUN}" -eq 1 ] ; then
+		cat "${sfdisk_in}"
+	fi
+	dry_run_exit
+
+	# Update the partition table
+	if [ "${DEBUG}" -eq 1 ] ; then
+		sfdisk "${dev}" < "${sfdisk_in}"
+	else
+		sfdisk -q "${dev}" < "${sfdisk_in}"
+		sfdisk -l "${dev}"
 	fi
 
-	pr_info "Unmounting all partitions of ${dev}"
+	# Re-read the modified partition table
+	if [ -b "${dev}" ] ; then
+		partx -u "${dev}"
+	fi
+}
 
-	# Unmount all partitions of the device
-	while IFS= read -r mountpoint ; do
-		if [ -n "${mountpoint}" ] && [ -d "${mountpoint}" ] ; then
-			umount "${mountpoint}" || umount -l "${mountpoint}"
+function build_uboot_scr()
+{
+	local script=${1}
+
+	pr_info "Building u-boot script ${script}"
+
+	mkimage -A arm -T script -C none -n 'u-boot script' -d "${script}" \
+			"${script%.txt}"
+}
+
+# -----------------------------------------------------------------------------
+# Main worker functions
+
+function init_dev()
+{
+	local dev=${1} image=${2}
+	local dev_size img_parts img_part1 img_part2
+	local part1_start part1_size part1_type
+	local part2_start part2_size part2_type
+
+	pr_info "Initializing device ${dev}"
+
+	# Get the size of the device (in #sectors)
+	dev_size=$(sfdisk -s "${dev}")
+	if [ -z "${dev_size}" ] ; then
+		pr_error "Unable to get size of device ${dev}"
+	fi
+	dev_size=$((dev_size * 1024 / 512))
+	pr_debug "dev_size: ${dev_size}"
+
+	# Get the partition information from the image file
+	readarray -t img_parts < <(probe_dev "${image}")
+	IFS=' ' read -r -a img_part1 <<< "${img_parts[0]}"
+	IFS=' ' read -r -a img_part2 <<< "${img_parts[1]}"
+	pr_debug "img_part1: ${img_part1[*]}"
+	pr_debug "img_part2: ${img_part2[*]}"
+
+	# The (custom/multiboot) boot partition
+	part1_start=2048
+	part1_size=${img_part1[2]}
+	part1_type=${img_part1[3]}
+	pr_debug "part1: start ${part1_start}, size ${part1_size}," \
+			 "type ${part1_type}"
+
+	# The extended partition
+	part2_start=$((part1_start + part1_size))
+	part2_size=$((dev_size - part2_start))
+	part2_type=5
+	pr_debug "part2: start ${part2_start}, size ${part2_size}," \
+			 "type ${part2_type}"
+
+	# Create the input file for sfdisk
+	cat <<EOF >sfdisk.in
+label: dos
+label-id: 0xdeadbeef
+device: ${dev}
+unit: sectors
+
+${dev}1 : start=${part1_start}, size=${part1_size}, type=${part1_type}, bootable
+${dev}2 : start=${part2_start}, size=${part2_size}, type=${part2_type}
+EOF
+
+	# Update the partition table
+	sfdisk_dev "${dev}" sfdisk.in
+
+	# Copy the boot partition from the Raspbian image
+	dd_dev "${image}:1" "${dev}:1"
+
+	# Configure the boot partition
+	config_dev "${dev}:1"
+}
+
+function add_os()
+{
+	local dev=${1} image=${2}
+	local dev_part img_parts img_part1 img_part2
+	local part1_num part1_start part1_size part1_type
+	local part2_num part2_start part2_size part2_type
+
+	# Get the (last) partition information from the device
+	IFS=' ' read -r -a dev_part <<< "$(probe_dev "${dev}" | tail -1)"
+	pr_debug "dev_part: ${dev_part[*]}"
+
+	# Get the partition information from the OS image
+	readarray -t img_parts < <(probe_dev "${image}")
+	IFS=' ' read -r -a img_part1 <<< "${img_parts[0]}"
+	IFS=' ' read -r -a img_part2 <<< "${img_parts[1]}"
+	pr_debug "img_part1: ${img_part1[*]}"
+	pr_debug "img_part2: ${img_part2[*]}"
+
+	# The new OS boot partition
+	part1_num=$((dev_part[0] + 1))
+	part1_start=$((dev_part[1] + dev_part[2]))
+	part1_size=${img_part1[2]}
+	part1_type=${img_part1[3]}
+
+	# The new OS rootfs partition
+	part2_num=$((part1_num + 1))
+	part2_start=$((part1_start + part1_size))
+	part2_size=$((4 * 1024 * 1024 * 1024 / 512))  # 4GB fixed size
+	part2_type=${img_part2[3]}
+
+	sfdisk -d "${dev}" > sfdisk.in
+	cat <<EOF >> sfdisk.in
+${dev}${part1_num} : start=${part1_start}, size=${part1_size}, type=${part1_type}
+${dev}${part2_num} : start=${part2_start}, size=${part2_size}, type=${part2_type}
+EOF
+
+	# Update the partition table
+	sfdisk_dev "${dev}" sfdisk.in
+
+	# Copy the partitions from the OS image to the device
+	dd_dev "${image}:1" "${dev}:${part1_num}"
+	dd_dev "${image}:2" "${dev}:${part2_num}"
+}
+
+function config_dev()
+{
+	local dev num
+
+	pr_info "Configuring device ${1}"
+
+	IFS=':' read -r -a dev <<< "${1}"
+	if [ ${#dev[@]} -eq 1 ] ; then
+		dev[1]=1
+	fi
+
+	# Create a temporary mount point
+	MOUNTPOINT=$(mktemp -d --tmpdir raspi-image-XXXXXX)
+	pr_debug "MOUNTPOINT: ${MOUNTPOINT}"
+
+	if [ "${dev[1]}" = "1" ] ; then
+		# Configure the (custom/multiboot) boot partition
+		MOUNTDEV=${dev[0]}:1
+		pr_debug "MOUNTDEV: ${MOUNTDEV}"
+		mount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
+		pr_info "Configuring the boot partition ${MOUNTDEV}"
+
+		build_uboot_scr boot/boot.scr.txt
+		cp boot/boot.scr boot/boot.scr.txt boot/config.txt boot/uboot_*.bin \
+		   "${MOUNTPOINT}"/
+		rm -f "${MOUNTPOINT}"/uboot_*.env "${MOUNTPOINT}"/*.img
+
+		umount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
+
+	else
+		# Configure an OS rootfs partition
+		MOUNTDEV=${dev[0]}:$((dev[1] + 1))
+		pr_debug "MOUNTDEV: ${MOUNTDEV}"
+		mount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
+
+		# Get the OS release information
+		# shellcheck disable=SC1090
+		.  "${MOUNTPOINT}"/etc/os-release
+		pr_info "Configuring the '${PRETTY_NAME}' OS rootfs partition ${MOUNTDEV}"
+
+		# Make sure nobody can call init_resize.sh since it would mess up our
+		# partition table
+		if [ -e "${MOUNTPOINT}"/usr/lib/raspi-config/init_resize.sh ] ; then
+			mv "${MOUNTPOINT}"/usr/lib/raspi-config/init_resize.sh \
+			   "${MOUNTPOINT}"/usr/lib/raspi-config/init_resize.sh.bak
 		fi
-	done < <(lsblk -n -o MOUNTPOINT "${dev}")
+
+		# Fix the UUIDs of the boot and rootfs partitions
+		sed -i 's,PARTUUID=[0-9a-f]*-01,PARTUUID=deadbeef-05,' \
+			"${MOUNTPOINT}"/etc/fstab
+		sed -i 's,PARTUUID=[0-9a-f]*-02,PARTUUID=deadbeef-06,' \
+			"${MOUNTPOINT}"/etc/fstab
+
+		umount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
+
+		# Configure the OS boot partition
+		MOUNTDEV=${dev[0]}:${dev[1]}
+		pr_debug "MOUNTDEV: ${MOUNTDEV}"
+		mount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
+		pr_info "Configuring the '${PRETTY_NAME}' OS boot partition ${MOUNTDEV}"
+
+		build_uboot_scr boot/"${ID}"/boot.scr.txt
+		cp boot/"${ID}"/boot.scr "${MOUNTPOINT}"/
+
+		umount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
+
+		# Add the OS to the multiboot menu
+		MOUNTDEV=${dev[0]}:1
+		pr_debug "MOUNTDEV: ${MOUNTDEV}"
+		mount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
+		pr_info "Adding '${PRETTY_NAME}' to the multiboot menu"
+
+		num=$((((dev[1] - 5)) / 2))
+		sed -i "s,^.*setenv x_title${num}.*,setenv x_title${num} \"${PRETTY_NAME}\","  "${MOUNTPOINT}"/boot.scr.txt
+		build_uboot_scr "${MOUNTPOINT}"/boot.scr.txt
+
+		umount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
+	fi
+
+	# Cleanup
+	rmdir "${MOUNTPOINT}" || true
+	MOUNTDEV=
+	MOUNTPOINT=
 }
 
 function dd_dev()
@@ -190,168 +395,8 @@ function dd_dev()
 	# Exit if this is a dry-run
 	dry_run_exit
 
-	# Unmount all partitions (just in case)
-	umount_dev_all "${dst[0]}"
-
 	# Copy the partition
 	dd "${dd_opts[@]}"
-}
-
-function config_dev()
-{
-	local dev=${1}
-	local script mountpoint
-
-	# Unmount all partitions (just in case)
-	umount_dev_all "${dev}"
-
-	# Compile all u-boot scripts
-	while IFS= read -r script ; do
-		pr_info "Building u-boot script ${script}"
-        mkimage -A arm -T script -C none -n 'u-boot script' -d "${script}" \
-				"${script%.txt}"
-	done < <(find boot/ -name '*.scr.txt')
-
-	# Create a temporary mount point
-	MOUNTPOINT=$(mktemp -d --tmpdir raspi-image-XXXXXX)
-	pr_debug "MOUNTPOINT: ${MOUNTPOINT}"
-
-	# Configure the boot partition (partition 1)
-	MOUNTDEV=${dev}:1
-	mount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
-	pr_info "Copying files to the boot partition ${MOUNTDEV}"
-
-	rm -f "${MOUNTPOINT}"/uboot_*.env "${MOUNTPOINT}"/*.img
-	cp boot/config.txt boot/boot.scr boot/uboot_*.bin "${MOUNTPOINT}"/
-
-	umount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
-
-	# Configure the Raspbian boot partition (partition 5)
-	MOUNTDEV=${dev}:5
-	mount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
-	pr_info "Copying files to the Raspbian boot partition ${MOUNTDEV}"
-
-	cp boot/raspbian/boot.scr "${MOUNTPOINT}"/
-
-	umount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
-
-	# Fix up the Raspbian rootfs partition (partition 6)
-	MOUNTDEV=${dev}:6
-	mount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
-	pr_info "Fixing up the Raspbian rootfs partition ${MOUNTDEV}"
-
-	# Make sure nobody can call init_resize.sh since it would mess up our
-	# partition table
-	if [ -e "${MOUNTPOINT}"/usr/lib/raspi-config/init_resize.sh ] ; then
-		mv "${MOUNTPOINT}"/usr/lib/raspi-config/init_resize.sh \
-		   "${MOUNTPOINT}"/usr/lib/raspi-config/init_resize.sh.bak
-	fi
-
-	# Fix the UUIDs of the boot and rootfs partitions
-	sed -i 's,PARTUUID=[0-9a-f]*-01,PARTUUID=deadbeef-05,' \
-		"${MOUNTPOINT}"/etc/fstab
-	sed -i 's,PARTUUID=[0-9a-f]*-02,PARTUUID=deadbeef-06,' \
-		"${MOUNTPOINT}"/etc/fstab
-
-	umount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
-
-	# Cleanup
-	rmdir "${MOUNTPOINT}" || true
-	MOUNTDEV=
-	MOUNTPOINT=
-}
-
-function init_dev()
-{
-	local dev=${1} image=${2}
-	local dev_size img_parts img_part1 img_part2
-	local part1_start part1_size part1_type part2_start part2_size part2_type
-	local part5_start part5_size part5_type part6_start part6_size part6_type
-
-	pr_info "Initializing device ${dev}"
-
-	# Get the size of the device (in #sectors)
-	dev_size=$(sfdisk -s "${dev}")
-	[ -n "${dev_size}" ]
-	dev_size=$((dev_size * 1024 / 512))
-	pr_debug "dev_size: ${dev_size}"
-
-	# Get the partition information from the image file
-	readarray -t img_parts < <(probe_dev "${image}")
-	IFS=' ' read -r -a img_part1 <<< "${img_parts[0]}"
-	IFS=' ' read -r -a img_part2 <<< "${img_parts[1]}"
-	pr_debug "img_part1: ${img_part1[*]}"
-	pr_debug "img_part2: ${img_part2[*]}"
-
-	# The (custom/multiboot) boot partition
-	part1_start=2048
-	part1_size=${img_part1[2]}
-	part1_type=${img_part1[3]}
-	pr_debug "part1: start ${part1_start}, size ${part1_size}," \
-			 "type ${part1_type}"
-
-	# The extended partition
-	part2_start=$((part1_start + part1_size))
-	part2_size=$((dev_size - part2_start))
-	part2_type=5
-	pr_debug "part2: start ${part2_start}, size ${part2_size}," \
-			 "type ${part2_type}"
-
-	# The Raspbian boot partition
-	part5_start=$(align "${part2_start}" 2048)
-	part5_size=${img_part1[2]}
-	part5_type=${img_part1[3]}
-	pr_debug "part5: start ${part5_start}, size ${part5_size}," \
-			 "type ${part5_type}"
-
-	# The Raspbian rootfs partition
-	part6_start=$((part5_start + part5_size))
-	part6_size=$((3 * 1024 * 1024 * 1024 / 512))  # 3GB fixed size
-	part6_type=${img_part2[3]}
-	pr_debug "part6: start ${part6_start}, size ${part6_size}," \
-			 "type ${part6_type}"
-
-	# Create the input file for sfdisk
-	cat <<EOF >sfdisk.in
-label: dos
-label-id: 0xdeadbeef
-device: ${dev}
-unit: sectors
-
-${dev}1 : start=${part1_start}, size=${part1_size}, type=${part1_type}, bootable
-${dev}2 : start=${part2_start}, size=${part2_size}, type=${part2_type}
-${dev}5 : start=${part5_start}, size=${part5_size}, type=${part5_type}
-${dev}6 : start=${part6_start}, size=${part6_size}, type=${part6_type}
-EOF
-
-	# Exit if this is a dry-run
-	if [ "${DRY_RUN}" -eq 1 ] ; then
-		cat sfdisk.in
-	fi
-	dry_run_exit
-
-	# Unmount all partitions (just in case)
-	umount_dev_all "${dev}"
-
-	# Wipe and partition the device
-	pr_info "Partitioning device ${dev}"
-	wipefs -a -f "${dev}"
-	if [ "${DEBUG}" -eq 1 ] ; then
-		sfdisk "${dev}" < sfdisk.in
-	else
-		sfdisk -q "${dev}" < sfdisk.in
-		sfdisk -l "${dev}"
-	fi
-
-	# Re-read the modified partition table
-	if [ -b "${dev}" ] ; then
-		partx -u "${dev}"
-	fi
-
-	# Copy the partitions from the Raspbian image to the device
-	dd_dev "${image}:1" "${dev}:1"
-	dd_dev "${image}:1" "${dev}:5"
-	dd_dev "${image}:2" "${dev}:6"
 }
 
 # -----------------------------------------------------------------------------
@@ -365,6 +410,16 @@ function do_init()
 	fi
 
 	init_dev "${@}"
+}
+
+function do_add()
+{
+	if [ $# -ne 2 ] ; then
+		usage
+		exit 2
+	fi
+
+	add_os "${@}"
 }
 
 function do_config()
@@ -396,10 +451,13 @@ Usage: raspi-image [-d] [-h] [r] COMMAND [OPTIONS]
 
 Supported commands
   init DEVICE RASPBIAN_IMAGE
-                 Initialize the device <DEVICE> using the Raspbian image
-                 <RASPBIAN_IMAGE>.
-  config DEVICE
-                 Configure the already initialized device DEVICE.
+                 Initialize the device DEVICE using the Raspbian image
+                 RASPBIAN_IMAGE.
+  add DEVICE OS_IMAGE
+                 Add the OS from OS_IMAGE to the device DEVICE.
+  config DEVICE[:PARTITION]
+                 Configure partition PARTITION of device DEVICE. If not
+                 specified, PARTITION defaults to 1.
   dd DEVICE1[:PARTITION1] DEVICE2[:PARTITION2]
                  Copy DEVICE1 to DEVICE2 using 'dd'. Operate on a partition
                  rather than a whole device if a PARTITIION number is
@@ -443,7 +501,7 @@ while [ $# -gt 0 ] ; do
 done
 
 case "${cmd}" in
-	init|config|dd)
+	init|config|add|dd)
 		true
 		;;
 	*)
@@ -452,6 +510,8 @@ case "${cmd}" in
 		;;
 esac
 
+MOUNTDEV=
+MOUNTPOINT=
 trap out EXIT INT TERM HUP
 
 "do_${cmd}" "${cmd_opts[@]}"
