@@ -9,11 +9,9 @@ function out()
 
 	trap - INT TERM EXIT HUP
 
-	if [ -n "${MOUNTDEV}" ] && [ -n "${MOUNTPOINT}" ] ; then
-		# Unmount any device that's still mounted
-		umount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
-		rmdir "${MOUNTPOINT}"
-	fi
+	# Clean up the mount and loop devices
+	umount_dev
+	losetup_detach
 
 	if [ "${rc}" -ne 0 ] ; then
 		# Emit a message if the script failed
@@ -67,66 +65,61 @@ function probe_dev()
 	done < <(partx -g -o NR,START,SECTORS,TYPE "${dev}")
 }
 
-# FIXME: Use losetup --show --find ${dev[0]}
-function partx_add_dev()
+function losetup_attach()
 {
-	local dev
+	local image=${1}
 
-	IFS=':' read -r -a dev <<< "${1}"
+	pr_info "Attaching ${image} to a loop device"
 
-	# Add the specified partition and print the loop device /dev/loopX
-	partx -v -a -n "${dev[1]}" "${dev[0]}" | \
-		grep "partition #${dev[1]} added" | sed 's,:.*,,'
+	LOOPDEV=$(losetup --show --partscan --find "${image}")
+	pr_debug "LOOPDEV: ${LOOPDEV}"
 }
 
-function partx_del_dev()
+function losetup_detach()
 {
-	local dev
+	if [ -n "${LOOPDEV}" ] ; then
+		return
+	fi
 
-	IFS=':' read -r -a dev <<< "${1}"
+	pr_info "Detaching image from ${LOOPDEV}"
 
-	# Delete the specified partition
-	partx -v -d -n "${dev[1]}" "${dev[0]}"
+	losetup --detach "${LOOPDEV}"
+	LOOPDEV=
 }
 
 function mount_dev()
 {
-	local dev mountpoint loopdev part
+	local dev part
 
 	pr_info "Mounting ${1}"
 
 	IFS=':' read -r -a dev <<< "${1}"
-	mountpoint=${2}
 
 	if [ -f "${dev[0]}" ] ; then
-		# It's an image file, so run partx -a (add)
-		pr_info "Adding partition ${1}"
-		loopdev=$(partx_add_dev "${1}")
-		pr_debug "loopdev: ${loopdev}"
-		part=${loopdev}p${dev[1]}
+		# It's an image file, so attach it to a loop device
+		losetup_attach "${dev[0]}"
+		part=${LOOPDEV}p${dev[1]}
 	else
 		part=${dev[0]}${dev[1]}
 	fi
 
-	mount "${part}" "${mountpoint}"
+	MOUNTPOINT=$(mktemp -d --tmpdir raspi-image-XXXXXX)
+	mount "${part}" "${MOUNTPOINT}"
 }
 
 function umount_dev()
 {
-	local dev mountpoint
-
-	pr_info "Unmounting ${1}"
-
-	IFS=':' read -r -a dev <<< "${1}"
-	mountpoint=${2}
-
-	umount "${mountpoint}" || umount -l "${mountpoint}"
-
-	if [ -f "${dev[0]}" ] ; then
-		pr_info "Deleting partition ${1}"
-		# It's an image file, so run partx -d (delete)
-		partx_del_dev "${1}"
+	if [ -z "${MOUNTPOINT}" ] ; then
+		return
 	fi
+
+	pr_info "Unmounting ${MOUNTPOINT}"
+
+	umount "${MOUNTPOINT}" || umount -l "${MOUNTPOINT}"
+	rmdir "${MOUNTPOINT}"
+	MOUNTPOINT=
+
+	losetup_detach
 }
 
 function sfdisk_dev()
@@ -286,34 +279,26 @@ function config_dev()
 	rootfs=$((boot + 1))
 	rootfs_uuid=$(printf "deadbeef-%02d" "${rootfs}")
 
-	# Create a temporary mount point
-	MOUNTPOINT=$(mktemp -d --tmpdir raspi-image-XXXXXX)
-	pr_debug "MOUNTPOINT: ${MOUNTPOINT}"
-
 	if [ "${boot}" = "1" ] ; then
 		# Configure the (custom/multiboot) boot partition
-		MOUNTDEV=${dev[0]}:1
-		pr_debug "MOUNTDEV: ${MOUNTDEV}"
-		mount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
-		pr_info "Configuring the boot partition ${MOUNTDEV}"
+		mount_dev "${dev[0]}:1"
+		pr_info "Configuring the boot partition"
 
 		build_uboot_scr boot/boot.scr.txt
 		cp boot/boot.scr boot/boot.scr.txt boot/config.txt boot/uboot_*.bin \
 		   "${MOUNTPOINT}"/
 		rm -f "${MOUNTPOINT}"/uboot_*.env "${MOUNTPOINT}"/*.img
 
-		umount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
+		umount_dev
 
 	else
 		# Configure an OS rootfs partition
-		MOUNTDEV=${dev[0]}:${rootfs}
-		pr_debug "MOUNTDEV: ${MOUNTDEV}"
-		mount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
+		mount_dev "${dev[0]}:${rootfs}"
 
 		# Get the OS release information
 		# shellcheck disable=SC1090
 		.  "${MOUNTPOINT}"/etc/os-release
-		pr_info "Configuring the '${PRETTY_NAME}' OS rootfs partition ${MOUNTDEV}"
+		pr_info "Configuring the '${PRETTY_NAME}' OS rootfs partition"
 
 		if [ "${ID}" = "raspbian" ] ; then
 			# Make sure nobody can call init_resize.sh since it would mess up
@@ -344,25 +329,21 @@ function config_dev()
 			pr_info "Unknown OS ID ${ID}"
 		fi
 
-		umount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
+		umount_dev
 
 		# Configure the OS boot partition
-		MOUNTDEV=${dev[0]}:${boot}
-		pr_debug "MOUNTDEV: ${MOUNTDEV}"
-		mount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
-		pr_info "Configuring the '${PRETTY_NAME}' OS boot partition ${MOUNTDEV}"
+		mount_dev "${dev[0]}:${boot}"
+		pr_info "Configuring the '${PRETTY_NAME}' OS boot partition"
 
 		sed -e "s,__BOOT__,${boot}," \
 			-e "s,__ROOTFS_UUID__,${rootfs_uuid}," \
 			boot/"${ID}"/boot.scr.txt > "${MOUNTPOINT}"/boot.scr.txt
 		build_uboot_scr  "${MOUNTPOINT}"/boot.scr.txt
 
-		umount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
+		umount_dev
 
 		# Add the OS to the multiboot menu
-		MOUNTDEV=${dev[0]}:1
-		pr_debug "MOUNTDEV: ${MOUNTDEV}"
-		mount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
+		mount_dev "${dev[0]}:1"
 		pr_info "Adding '${PRETTY_NAME}' to the multiboot menu"
 
 		num=$((((boot - 5)) / 2))
@@ -370,13 +351,8 @@ function config_dev()
 			"${MOUNTPOINT}"/boot.scr.txt
 		build_uboot_scr "${MOUNTPOINT}"/boot.scr.txt
 
-		umount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
+		umount_dev
 	fi
-
-	# Cleanup
-	rmdir "${MOUNTPOINT}" || true
-	MOUNTDEV=
-	MOUNTPOINT=
 }
 
 function dd_dev()
@@ -536,8 +512,8 @@ case "${cmd}" in
 		;;
 esac
 
-MOUNTDEV=
 MOUNTPOINT=
+LOOPDEV=
 trap out EXIT INT TERM HUP
 
 "do_${cmd}" "${cmd_opts[@]}"
