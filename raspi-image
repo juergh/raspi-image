@@ -67,6 +67,7 @@ function probe_dev()
 	done < <(partx -g -o NR,START,SECTORS,TYPE "${dev}")
 }
 
+# FIXME: Use losetup --show --find ${dev[0]}
 function partx_add_dev()
 {
 	local dev
@@ -123,7 +124,7 @@ function umount_dev()
 
 	if [ -f "${dev[0]}" ] ; then
 		pr_info "Deleting partition ${1}"
-		# It's a image file, so run partx -d (delete)
+		# It's an image file, so run partx -d (delete)
 		partx_del_dev "${1}"
 	fi
 }
@@ -270,7 +271,7 @@ EOF
 
 function config_dev()
 {
-	local dev num
+	local dev boot boot_uuid rootfs rootfs_uuid num
 
 	pr_info "Configuring device ${1}"
 
@@ -279,11 +280,17 @@ function config_dev()
 		dev[1]=1
 	fi
 
+	# The boot and rootfs partition numbers and UUIDs
+	boot=${dev[1]}
+	boot_uuid=$(printf "deadbeef-%02d" "${boot}")
+	rootfs=$((boot + 1))
+	rootfs_uuid=$(printf "deadbeef-%02d" "${rootfs}")
+
 	# Create a temporary mount point
 	MOUNTPOINT=$(mktemp -d --tmpdir raspi-image-XXXXXX)
 	pr_debug "MOUNTPOINT: ${MOUNTPOINT}"
 
-	if [ "${dev[1]}" = "1" ] ; then
+	if [ "${boot}" = "1" ] ; then
 		# Configure the (custom/multiboot) boot partition
 		MOUNTDEV=${dev[0]}:1
 		pr_debug "MOUNTDEV: ${MOUNTDEV}"
@@ -299,7 +306,7 @@ function config_dev()
 
 	else
 		# Configure an OS rootfs partition
-		MOUNTDEV=${dev[0]}:$((dev[1] + 1))
+		MOUNTDEV=${dev[0]}:${rootfs}
 		pr_debug "MOUNTDEV: ${MOUNTDEV}"
 		mount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
 
@@ -308,29 +315,47 @@ function config_dev()
 		.  "${MOUNTPOINT}"/etc/os-release
 		pr_info "Configuring the '${PRETTY_NAME}' OS rootfs partition ${MOUNTDEV}"
 
-		# Make sure nobody can call init_resize.sh since it would mess up our
-		# partition table
-		if [ -e "${MOUNTPOINT}"/usr/lib/raspi-config/init_resize.sh ] ; then
-			mv "${MOUNTPOINT}"/usr/lib/raspi-config/init_resize.sh \
-			   "${MOUNTPOINT}"/usr/lib/raspi-config/init_resize.sh.bak
-		fi
+		if [ "${ID}" = "raspbian" ] ; then
+			# Make sure nobody can call init_resize.sh since it would mess up
+			# the partition table
+			if [ -e "${MOUNTPOINT}"/usr/lib/raspi-config/init_resize.sh ] ; then
+				mv "${MOUNTPOINT}"/usr/lib/raspi-config/init_resize.sh \
+				   "${MOUNTPOINT}"/usr/lib/raspi-config/init_resize.sh.bak
+			fi
 
-		# Fix the UUIDs of the boot and rootfs partitions
-		sed -i 's,PARTUUID=[0-9a-f]*-01,PARTUUID=deadbeef-05,' \
-			"${MOUNTPOINT}"/etc/fstab
-		sed -i 's,PARTUUID=[0-9a-f]*-02,PARTUUID=deadbeef-06,' \
-			"${MOUNTPOINT}"/etc/fstab
+			# Fix the UUIDs of the boot and rootfs partitions
+			sed -i "s,PARTUUID=[0-9a-f]*-01,PARTUUID=${boot_uuid}," \
+				"${MOUNTPOINT}"/etc/fstab
+			sed -i "s,PARTUUID=[0-9a-f]*-02,PARTUUID=${rootfs_uuid}," \
+				"${MOUNTPOINT}"/etc/fstab
+
+		elif [ "${ID}" = "ubuntu" ] ; then
+			# Make sure cloud-init doesn't run growpart since it would mess up
+			# the partition table
+			sed -i '/^ - growpart/d' "${MOUNTPOINT}"/etc/cloud/cloud.cfg
+
+			# Fix the UUIDs of the boot and rootfs partitions
+			sed -i "s,LABEL=system-boot,PARTUUID=${boot_uuid}," \
+				"${MOUNTPOINT}"/etc/fstab
+			sed -i "s,LABEL=cloudimg-rootfs,PARTUUID=${rootfs_uuid}," \
+				"${MOUNTPOINT}"/etc/fstab
+
+		else
+			pr_info "Unknown OS ID ${ID}"
+		fi
 
 		umount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
 
 		# Configure the OS boot partition
-		MOUNTDEV=${dev[0]}:${dev[1]}
+		MOUNTDEV=${dev[0]}:${boot}
 		pr_debug "MOUNTDEV: ${MOUNTDEV}"
 		mount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
 		pr_info "Configuring the '${PRETTY_NAME}' OS boot partition ${MOUNTDEV}"
 
-		build_uboot_scr boot/"${ID}"/boot.scr.txt
-		cp boot/"${ID}"/boot.scr "${MOUNTPOINT}"/
+		sed -e "s,__BOOT__,${boot}," \
+			-e "s,__ROOTFS_UUID__,${rootfs_uuid}," \
+			boot/"${ID}"/boot.scr.txt > "${MOUNTPOINT}"/boot.scr.txt
+		build_uboot_scr  "${MOUNTPOINT}"/boot.scr.txt
 
 		umount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
 
@@ -340,8 +365,9 @@ function config_dev()
 		mount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
 		pr_info "Adding '${PRETTY_NAME}' to the multiboot menu"
 
-		num=$((((dev[1] - 5)) / 2))
-		sed -i "s,^.*setenv x_title${num}.*,setenv x_title${num} \"${PRETTY_NAME}\","  "${MOUNTPOINT}"/boot.scr.txt
+		num=$((((boot - 5)) / 2))
+		sed -i "s,^.*setenv x_title${num}.*,setenv x_title${num} \"${PRETTY_NAME}\"," \
+			"${MOUNTPOINT}"/boot.scr.txt
 		build_uboot_scr "${MOUNTPOINT}"/boot.scr.txt
 
 		umount_dev "${MOUNTDEV}" "${MOUNTPOINT}"
