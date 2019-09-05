@@ -29,7 +29,7 @@ setenv bootmenu_4 "${x_title4}=setenv x_bootnum 4; echo Booting ${x_title4}...; 
 # Clear the entries that don't have titles defined and add a 'Reset board'
 # entry as the last menu entry
 last=-1
-for n in 0 1 2 3 5; do if env exists x_title${n}; then true; else env delete bootmenu_${n}; if test ${last} -eq -1; then last=${n}; fi; fi; done
+for n in 0 1 2 3 4; do if env exists x_title${n}; then true; else env delete bootmenu_${n}; if test ${last} -eq -1; then last=${n}; fi; fi; done
 setenv bootmenu_${last} "Reset board=reset"
 
 # Display the bootmenu
