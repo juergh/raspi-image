@@ -52,7 +52,7 @@ function align()
 {
 	local val=${1} align=${2}
 
-	echo $(($((val / align + 1)) * align))
+	echo $(((val / align + 1) * align))
 }
 
 function probe_dev()
@@ -67,17 +67,17 @@ function probe_dev()
 
 function losetup_attach()
 {
-	local image=${1}
+	local img=${1}
 
-	pr_info "Attaching ${image} to a loop device"
+	pr_info "Attaching ${img} to a loop device"
 
-	LOOPDEV=$(losetup --show --partscan --find "${image}")
+	LOOPDEV=$(losetup --show --partscan --find "${img}")
 	pr_debug "LOOPDEV: ${LOOPDEV}"
 }
 
 function losetup_detach()
 {
-	if [ -n "${LOOPDEV}" ] ; then
+	if [ -z "${LOOPDEV}" ] ; then
 		return
 	fi
 
@@ -122,6 +122,50 @@ function umount_dev()
 	losetup_detach
 }
 
+function format_dev()
+{
+	local fstype=${2} label=${3}
+	local dev
+
+	pr_info "Formatting ${1} (${fstype}, ${label})"
+
+	IFS=':' read -r -a dev <<< "${1}"
+
+	if [ -f "${dev[0]}" ] ; then
+		# It's an image file, so attach it to a loop device
+		losetup_attach "${dev[0]}"
+		part=${LOOPDEV}p${dev[1]}
+	else
+		part=${dev[0]}${dev[1]}
+	fi
+
+	"mkfs.${fstype}" -n "${label}" "${part}"
+
+	losetup_detach
+}
+
+function label_dev()
+{
+	local fstype=${2} label=${3}
+	local dev
+
+	pr_info "Labeling ${1} (${fstype}, ${label})"
+
+	IFS=':' read -r -a dev <<< "${1}"
+
+	if [ -f "${dev[0]}" ] ; then
+		# It's an image file, so attach it to a loop device
+		losetup_attach "${dev[0]}"
+		part=${LOOPDEV}p${dev[1]}
+	else
+		part=${dev[0]}${dev[1]}
+	fi
+
+	"${fstype}label" "${part}" "${label}"
+
+	losetup_detach
+}
+
 function sfdisk_dev()
 {
 	local dev=${1} sfdisk_in=${2}
@@ -161,10 +205,10 @@ function build_uboot_scr()
 
 function init_dev()
 {
-	local dev=${1} image=${2}
-	local dev_size img_parts img_part1 img_part2
-	local part1_start part1_size part1_type
-	local part2_start part2_size part2_type
+	local dev=${1}
+	local dev_size
+	local boot_start boot_size boot_type
+	local ext_start ext_size ext_type
 
 	pr_info "Initializing device ${dev}"
 
@@ -176,26 +220,19 @@ function init_dev()
 	dev_size=$((dev_size * 1024 / 512))
 	pr_debug "dev_size: ${dev_size}"
 
-	# Get the partition information from the image file
-	readarray -t img_parts < <(probe_dev "${image}")
-	IFS=' ' read -r -a img_part1 <<< "${img_parts[0]}"
-	IFS=' ' read -r -a img_part2 <<< "${img_parts[1]}"
-	pr_debug "img_part1: ${img_part1[*]}"
-	pr_debug "img_part2: ${img_part2[*]}"
-
 	# The (custom/multiboot) boot partition
-	part1_start=2048
-	part1_size=${img_part1[2]}
-	part1_type=${img_part1[3]}
-	pr_debug "part1: start ${part1_start}, size ${part1_size}," \
-			 "type ${part1_type}"
+	boot_start=2048
+	boot_size=$((128 * 1024 * 1024 / 512))
+	boot_type=c
+	pr_debug "boot: start ${boot_start}, size ${boot_size}," \
+			 "type ${boot_type}"
 
 	# The extended partition
-	part2_start=$((part1_start + part1_size))
-	part2_size=$((dev_size - part2_start))
-	part2_type=5
-	pr_debug "part2: start ${part2_start}, size ${part2_size}," \
-			 "type ${part2_type}"
+	ext_start=$(align "$((boot_start + boot_size))" 4096)
+	ext_size=$((dev_size - ext_start))
+	ext_type=5
+	pr_debug "ext: start ${ext_start}, size ${ext_size}," \
+			 "type ${ext_type}"
 
 	# Create the input file for sfdisk
 	cat <<EOF >sfdisk.in
@@ -204,15 +241,26 @@ label-id: 0xdeadbeef
 device: ${dev}
 unit: sectors
 
-${dev}1 : start=${part1_start}, size=${part1_size}, type=${part1_type}, bootable
-${dev}2 : start=${part2_start}, size=${part2_size}, type=${part2_type}
+${dev}1 : start=${boot_start}, size=${boot_size}, type=${boot_type}, bootable
+${dev}2 : start=${ext_start}, size=${ext_size}, type=${ext_type}
 EOF
 
 	# Update the partition table
 	sfdisk_dev "${dev}" sfdisk.in
 
-	# Copy the boot partition from the Raspbian image
-	dd_dev "${image}:1" "${dev}:1"
+	# Format the boot partition
+	format_dev "${dev}:1" vfat boot
+
+	# Clone the Raspberry Pi firmware repo
+	if ! [ -d rpi-firmware ] ; then
+		git clone --depth 1 \
+			https://github.com/raspberrypi/firmware.git rpi-firmware
+	fi
+
+	# Copy the boot files
+	mount_dev "${dev}:1"
+	cp -r rpi-firmware/boot/. "${MOUNTPOINT}"
+	umount_dev
 
 	# Configure the boot partition
 	config_dev "${dev}:1"
@@ -220,51 +268,59 @@ EOF
 
 function add_os()
 {
-	local dev=${1} image=${2}
-	local dev_part img_parts img_part1 img_part2
-	local part1_num part1_start part1_size part1_type
-	local part2_num part2_start part2_size part2_type
+	local dev=${1} img=${2}
+	local dev_last img_parts img_boot img_rootfs
+	local boot_num boot_start boot_size boot_type
+	local rootfs_num rootfs_start rootfs_size rootfs_type
 
 	# Get the (last) partition information from the device
-	IFS=' ' read -r -a dev_part <<< "$(probe_dev "${dev}" | tail -1)"
-	pr_debug "dev_part: ${dev_part[*]}"
+	IFS=' ' read -r -a dev_last <<< "$(probe_dev "${dev}" | tail -1)"
+	pr_debug "dev_last: ${dev_last[*]}"
 
 	# Get the partition information from the OS image
-	readarray -t img_parts < <(probe_dev "${image}")
-	IFS=' ' read -r -a img_part1 <<< "${img_parts[0]}"
-	IFS=' ' read -r -a img_part2 <<< "${img_parts[1]}"
-	pr_debug "img_part1: ${img_part1[*]}"
-	pr_debug "img_part2: ${img_part2[*]}"
+	readarray -t img_parts < <(probe_dev "${img}")
+	IFS=' ' read -r -a img_boot <<< "${img_parts[0]}"
+	IFS=' ' read -r -a img_rootfs <<< "${img_parts[1]}"
+	pr_debug "img_boot: ${img_boot[*]}"
+	pr_debug "img_rootfs: ${img_rootfs[*]}"
 
 	# The new OS boot partition
-	part1_num=$((dev_part[0] + 1))
-	part1_start=$((dev_part[1] + dev_part[2]))
-	part1_size=${img_part1[2]}
-	part1_type=${img_part1[3]}
+	if [ "${dev_last[0]}" = "2" ] ; then
+		boot_num=5
+		boot_start=$(align "${dev_last[1]}" 4096)
+	else
+		boot_num=$((dev_last[0] + 1))
+		boot_start=$(align "$((dev_last[1] + dev_last[2]))" 4096)
+	fi
+	boot_size=${img_boot[2]}
+	boot_type=${img_boot[3]}
 
 	# The new OS rootfs partition
-	part2_num=$((part1_num + 1))
-	part2_start=$((part1_start + part1_size))
-	part2_size=$((4 * 1024 * 1024 * 1024 / 512))  # 4GB fixed size
-	part2_type=${img_part2[3]}
+	rootfs_num=$((boot_num + 1))
+	rootfs_start=$(align "$((boot_start + boot_size))" 4096)
+	rootfs_size=$((4 * 1024 * 1024 * 1024 / 512))  # 4GB fixed size
+	rootfs_type=${img_rootfs[3]}
 
 	sfdisk -d "${dev}" > sfdisk.in
 	cat <<EOF >> sfdisk.in
-${dev}${part1_num} : start=${part1_start}, size=${part1_size}, type=${part1_type}
-${dev}${part2_num} : start=${part2_start}, size=${part2_size}, type=${part2_type}
+${dev}${boot_num} : start=${boot_start}, size=${boot_size}, type=${boot_type}
+${dev}${rootfs_num} : start=${rootfs_start}, size=${rootfs_size}, type=${rootfs_type}
 EOF
 
 	# Update the partition table
 	sfdisk_dev "${dev}" sfdisk.in
 
 	# Copy the partitions from the OS image to the device
-	dd_dev "${image}:1" "${dev}:${part1_num}"
-	dd_dev "${image}:2" "${dev}:${part2_num}"
+	dd_dev "${img}:1" "${dev}:${boot_num}"
+	dd_dev "${img}:2" "${dev}:${rootfs_num}"
+
+	# Configure the new OS
+	config_dev "${dev}:${boot_num}"
 }
 
 function config_dev()
 {
-	local dev boot boot_uuid rootfs rootfs_uuid num
+	local dev boot_num boot_uuid rootfs_num rootfs_uuid num
 
 	pr_info "Configuring device ${1}"
 
@@ -274,12 +330,12 @@ function config_dev()
 	fi
 
 	# The boot and rootfs partition numbers and UUIDs
-	boot=${dev[1]}
-	boot_uuid=$(printf "deadbeef-%02d" "${boot}")
-	rootfs=$((boot + 1))
-	rootfs_uuid=$(printf "deadbeef-%02d" "${rootfs}")
+	boot_num=${dev[1]}
+	boot_uuid=$(printf "deadbeef-%02d" "${boot_num}")
+	rootfs_num=$((boot_num + 1))
+	rootfs_uuid=$(printf "deadbeef-%02d" "${rootfs_num}")
 
-	if [ "${boot}" = "1" ] ; then
+	if [ "${boot_num}" = "1" ] ; then
 		# Configure the (custom/multiboot) boot partition
 		mount_dev "${dev[0]}:1"
 		pr_info "Configuring the boot partition"
@@ -287,13 +343,17 @@ function config_dev()
 		build_uboot_scr boot/boot.scr.txt
 		cp boot/boot.scr boot/boot.scr.txt boot/config.txt boot/uboot_*.bin \
 		   "${MOUNTPOINT}"/
-		rm -f "${MOUNTPOINT}"/uboot_*.env "${MOUNTPOINT}"/*.img
+		rm -f "${MOUNTPOINT}"/uboot_*.env
 
 		umount_dev
 
 	else
+		# Relabel the partitions
+		label_dev "${dev[0]}:${boot_num}" fat "boot-${boot_num}"
+		label_dev "${dev[0]}:${rootfs_num}" e2 "rootfs-${rootfs_num}"
+
 		# Configure an OS rootfs partition
-		mount_dev "${dev[0]}:${rootfs}"
+		mount_dev "${dev[0]}:${rootfs_num}"
 
 		# Get the OS release information
 		# shellcheck disable=SC1090
@@ -332,10 +392,10 @@ function config_dev()
 		umount_dev
 
 		# Configure the OS boot partition
-		mount_dev "${dev[0]}:${boot}"
+		mount_dev "${dev[0]}:${boot_num}"
 		pr_info "Configuring the '${PRETTY_NAME}' OS boot partition"
 
-		sed -e "s,__BOOT__,${boot}," \
+		sed -e "s,__BOOT__,${boot_num}," \
 			-e "s,__ROOTFS_UUID__,${rootfs_uuid}," \
 			boot/"${ID}"/boot.scr.txt > "${MOUNTPOINT}"/boot.scr.txt
 		build_uboot_scr  "${MOUNTPOINT}"/boot.scr.txt
@@ -346,7 +406,7 @@ function config_dev()
 		mount_dev "${dev[0]}:1"
 		pr_info "Adding '${PRETTY_NAME}' to the multiboot menu"
 
-		num=$((((boot - 5)) / 2))
+		num=$((((boot_num - 5)) / 2))
 		sed -i "s,^.*setenv x_title${num}.*,setenv x_title${num} \"${PRETTY_NAME}\"," \
 			"${MOUNTPOINT}"/boot.scr.txt
 		build_uboot_scr "${MOUNTPOINT}"/boot.scr.txt
@@ -406,7 +466,7 @@ function dd_dev()
 
 function do_init()
 {
-	if [ $# -ne 2 ] ; then
+	if [ $# -ne 1 ] ; then
 		usage
 		exit 2
 	fi
@@ -452,9 +512,7 @@ function usage()
 Usage: raspi-image [-d] [-h] [r] COMMAND [OPTIONS]
 
 Supported commands
-  init DEVICE RASPBIAN_IMAGE
-                 Initialize the device DEVICE using the Raspbian image
-                 RASPBIAN_IMAGE.
+  init DEVICE    Initialize the device DEVICE.
   add DEVICE OS_IMAGE
                  Add the OS from OS_IMAGE to the device DEVICE.
   config DEVICE[:PARTITION]
