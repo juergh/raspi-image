@@ -1,5 +1,5 @@
 *~
 *.bin
 *.img
-*.scr
+rpi-firmware/
 u-boot/
