@@ -326,7 +326,7 @@ EOF
 	format_dev "${dev}:${boot_num}" vfat "boot-${boot_num}"
 
 	# Copy the boot files from the OS image to the device
-	echo "Copying boot files from ${img}:1 to ${dev}:${boot_num}"
+	pr_info "Copying boot files from ${img}:1 to ${dev}:${boot_num}"
 	TMPDIR=$(mktemp -d )
 	mount_dev "${img}:1"
 	cp -r "${MOUNTPOINT}"/. "${TMPDIR}"/
@@ -337,7 +337,7 @@ EOF
 	rmdir "${TMPDIR}"
 	TMPDIR=
 
-	# Copy the rootfs partitions from the OS image to the device
+	# Copy the rootfs partition from the OS image to the device
 	dd_dev "${img}:2" "${dev}:${rootfs_num}"
 
 	# Relabel the rootfs partition
@@ -369,7 +369,7 @@ function config_dev()
 		mount_dev "${dev[0]}:1"
 		pr_info "Configuring the boot partition"
 
-		# Copy the custome boot files
+		# Copy the custom boot files
 		cp boot/boot.scr.txt boot/config.txt boot/uboot_*.bin \
 		   "${MOUNTPOINT}"/
 		rm -f "${MOUNTPOINT}"/uboot_*.env
@@ -414,7 +414,7 @@ function config_dev()
 				"${MOUNTPOINT}"/etc/fstab
 
 		else
-			pr_info "Unknown OS ID ${ID}"
+			pr_info "Unknown OS ID: ${ID}"
 		fi
 
 		umount_dev
