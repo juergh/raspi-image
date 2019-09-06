@@ -18,6 +18,11 @@ function out()
 	umount_dev
 	losetup_detach
 
+	# Remove the temporary directory
+	if [ -n "${TMPDIR}" ] ; then
+		rm -rf "${TMPDIR}"
+	fi
+
 	if [ "${rc}" -ne 0 ] ; then
 		# Emit a message if the script failed
 		pr_error "Script failed"
@@ -132,7 +137,7 @@ function format_dev()
 	local fstype=${2} label=${3}
 	local dev
 
-	pr_info "Formatting ${1} (${fstype}, ${label})"
+	pr_info "Formatting ${1} (fstype=${fstype}, label=${label})"
 
 	IFS=':' read -r -a dev <<< "${1}"
 
@@ -264,9 +269,9 @@ EOF
 	fi
 
 	# Copy the boot files
-	pr_info "Copying firmware files to ${dev}:1"
+	pr_info "Copying boot files from rpi-firmware/boot to ${dev}:1"
 	mount_dev "${dev}:1"
-	cp -r rpi-firmware/boot/. "${MOUNTPOINT}"
+	cp -r rpi-firmware/boot/. "${MOUNTPOINT}"/
 	umount_dev
 
 	# Configure the boot partition
@@ -317,9 +322,26 @@ EOF
 	# Update the partition table
 	sfdisk_dev "${dev}" sfdisk.in
 
-	# Copy the partitions from the OS image to the device
-	dd_dev "${img}:1" "${dev}:${boot_num}"
+	# Format the new OS boot partition
+	format_dev "${dev}:${boot_num}" vfat "boot-${boot_num}"
+
+	# Copy the boot files from the OS image to the device
+	echo "Copying boot files from ${img}:1 to ${dev}:${boot_num}"
+	TMPDIR=$(mktemp -d )
+	mount_dev "${img}:1"
+	cp -r "${MOUNTPOINT}"/. "${TMPDIR}"/
+	umount_dev
+	mount_dev "${dev}:${boot_num}"
+	mv "${TMPDIR}"/* "${MOUNTPOINT}"/.
+	umount_dev
+	rmdir "${TMPDIR}"
+	TMPDIR=
+
+	# Copy the rootfs partitions from the OS image to the device
 	dd_dev "${img}:2" "${dev}:${rootfs_num}"
+
+	# Relabel the rootfs partition
+	label_dev "${dev}:${rootfs_num}" e2 "rootfs-${rootfs_num}"
 
 	# Configure the new OS
 	config_dev "${dev}:${boot_num}"
@@ -358,10 +380,6 @@ function config_dev()
 		umount_dev
 
 	else
-		# Relabel the partitions
-		label_dev "${dev[0]}:${boot_num}" fat "boot-${boot_num}"
-		label_dev "${dev[0]}:${rootfs_num}" e2 "rootfs-${rootfs_num}"
-
 		# Configure an OS rootfs partition
 		mount_dev "${dev[0]}:${rootfs_num}"
 
@@ -582,6 +600,7 @@ esac
 
 MOUNTPOINT=
 LOOPDEV=
+TMPDIR=
 trap out EXIT INT TERM HUP
 
 "do_${cmd}" "${cmd_opts[@]}"
