@@ -3,9 +3,11 @@
 # Build and manipulate a Raspberry Pi image
 #
 
-# Globals
+DISK_UUID="deadbeef"
+
 BOOT_START=2048   # Starting sector of boot partition
 BOOT_SIZE=128     # Boot partition size (in MB)
+
 ROOTFS_SIZE=4096  # Rootfs partition size (in MB)
 
 function out()
@@ -210,6 +212,110 @@ function build_uboot_scr()
 			"${script%.txt}"
 }
 
+function config_boot()
+{
+	local dev=${1}
+
+	if [ "${UBOOT}" -eq 0 ] ; then
+		# Nothing to do if we don't use u-boot
+		return
+	fi
+
+	# Configure the boot partition
+	pr_info "Configuring the boot partition ${dev}:1"
+	mount_dev "${dev}:1"
+
+	# Copy the custom boot files
+	cp boot/boot.scr.txt boot/config.txt boot/uboot_*.bin \
+	   "${MOUNTPOINT}"/
+	rm -f "${MOUNTPOINT}"/uboot_*.env
+
+	# Build the u-boot boot script
+	build_uboot_scr "${MOUNTPOINT}"/boot.scr.txt
+
+	umount_dev
+}
+
+function config_os()
+{
+	local dev boot_num boot_uuid rootfs_num rootfs_uuid num
+
+	IFS=':' read -r -a dev <<< "${1}"
+
+	# The boot and rootfs partition numbers and UUIDs
+	boot_num=${dev[1]}
+	boot_uuid=$(printf "%s-%02d" "${DISK_UUID}" "${boot_num}")
+	rootfs_num=$((boot_num + 1))
+	rootfs_uuid=$(printf "%s-%02d" "${DISK_UUID}" "${rootfs_num}")
+
+	# Configure the OS rootfs partition
+	pr_info "Configuring the OS rootfs partition ${dev[0]}:${rootfs_num}"
+	mount_dev "${dev[0]}:${rootfs_num}"
+
+	# Get the OS release information
+	# shellcheck disable=SC1090
+	.  "${MOUNTPOINT}"/etc/os-release
+	pr_info "Found a '${PRETTY_NAME}' OS"
+
+	if [ "${ID}" = "raspbian" ] ; then
+		# Make sure nobody can call init_resize.sh since it would mess up
+		# the partition table
+		if [ -e "${MOUNTPOINT}"/usr/lib/raspi-config/init_resize.sh ] ; then
+			mv "${MOUNTPOINT}"/usr/lib/raspi-config/init_resize.sh \
+			   "${MOUNTPOINT}"/usr/lib/raspi-config/init_resize.sh.bak
+		fi
+
+		# Fix the UUIDs of the boot and rootfs partitions
+		sed -i "s,PARTUUID=[0-9a-f]*-01,PARTUUID=${boot_uuid}," \
+			"${MOUNTPOINT}"/etc/fstab
+		sed -i "s,PARTUUID=[0-9a-f]*-02,PARTUUID=${rootfs_uuid}," \
+			"${MOUNTPOINT}"/etc/fstab
+
+	elif [ "${ID}" = "ubuntu" ] ; then
+		# Make sure cloud-init doesn't run growpart since it would mess up
+		# the partition table
+		sed -i '/^ - growpart/d' "${MOUNTPOINT}"/etc/cloud/cloud.cfg
+
+		# Fix the UUIDs of the boot and rootfs partitions
+		sed -i "s,LABEL=system-boot,PARTUUID=${boot_uuid}," \
+			"${MOUNTPOINT}"/etc/fstab
+		sed -i "s,LABEL=cloudimg-rootfs,PARTUUID=${rootfs_uuid}," \
+			"${MOUNTPOINT}"/etc/fstab
+
+	else
+		pr_info "Unknown OS ID: ${ID}"
+	fi
+
+	umount_dev
+
+	if [ "${UBOOT}" -eq 0 ] ; then
+		# All done if we don't use u-boot
+		return
+	fi
+
+	# Configure the OS boot partition
+	pr_info "Configuring the OS boot partition ${dev[0]}:${boot_num}"
+	mount_dev "${dev[0]}:${boot_num}"
+
+	sed -e "s,__BOOT__,${boot_num}," \
+		-e "s,__ROOTFS_UUID__,${rootfs_uuid}," \
+		boot/"${ID}"/boot.scr.txt > "${MOUNTPOINT}"/boot.scr.txt
+	build_uboot_scr  "${MOUNTPOINT}"/boot.scr.txt
+
+	umount_dev
+
+	# Add the OS to the multiboot menu
+	mount_dev "${dev[0]}:1"
+	pr_info "Adding '${PRETTY_NAME}' to the multiboot menu"
+
+	num=$((((boot_num - 5)) / 2))
+	sed -i "s,^.*setenv x_title${num}.*,setenv x_title${num} \"${PRETTY_NAME}\"," \
+		"${MOUNTPOINT}"/boot.scr.txt
+	build_uboot_scr "${MOUNTPOINT}"/boot.scr.txt
+
+	umount_dev
+}
+
 # -----------------------------------------------------------------------------
 # Main worker functions
 
@@ -247,7 +353,7 @@ function init_dev()
 	# Create the input file for sfdisk
 	cat <<EOF >sfdisk.in
 label: dos
-label-id: 0xdeadbeef
+label-id: 0x${DISK_UUID}
 device: ${dev}
 unit: sectors
 
@@ -260,6 +366,11 @@ EOF
 
 	# Format the boot partition
 	format_dev "${dev}:1" vfat boot
+
+	if [ "${UBOOT}" -eq 0 ] ; then
+		# All done if we don't use u-boot
+		return
+	fi
 
 	# Clone the Raspberry Pi firmware repo
 	if ! [ -d rpi-firmware ] ; then
@@ -275,7 +386,7 @@ EOF
 	umount_dev
 
 	# Configure the boot partition
-	config_dev "${dev}:1"
+	config_boot "${dev}"
 }
 
 function add_os()
@@ -344,12 +455,12 @@ EOF
 	label_dev "${dev}:${rootfs_num}" e2 "rootfs-${rootfs_num}"
 
 	# Configure the new OS
-	config_dev "${dev}:${boot_num}"
+	config_os "${dev}:${boot_num}"
 }
 
 function config_dev()
 {
-	local dev boot_num boot_uuid rootfs_num rootfs_uuid num
+	local dev
 
 	pr_info "Configuring device ${1}"
 
@@ -358,88 +469,10 @@ function config_dev()
 		dev[1]=1
 	fi
 
-	# The boot and rootfs partition numbers and UUIDs
-	boot_num=${dev[1]}
-	boot_uuid=$(printf "deadbeef-%02d" "${boot_num}")
-	rootfs_num=$((boot_num + 1))
-	rootfs_uuid=$(printf "deadbeef-%02d" "${rootfs_num}")
-
-	if [ "${boot_num}" = "1" ] ; then
-		# Configure the (custom/multiboot) boot partition
-		mount_dev "${dev[0]}:1"
-		pr_info "Configuring the boot partition"
-
-		# Copy the custom boot files
-		cp boot/boot.scr.txt boot/config.txt boot/uboot_*.bin \
-		   "${MOUNTPOINT}"/
-		rm -f "${MOUNTPOINT}"/uboot_*.env
-
-		# Build the u-boot script
-		build_uboot_scr "${MOUNTPOINT}"/boot.scr.txt
-
-		umount_dev
-
+	if [ "${dev[1]}" = "1" ] ; then
+		config_boot "${dev[0]}"
 	else
-		# Configure an OS rootfs partition
-		mount_dev "${dev[0]}:${rootfs_num}"
-
-		# Get the OS release information
-		# shellcheck disable=SC1090
-		.  "${MOUNTPOINT}"/etc/os-release
-		pr_info "Configuring the '${PRETTY_NAME}' OS rootfs partition"
-
-		if [ "${ID}" = "raspbian" ] ; then
-			# Make sure nobody can call init_resize.sh since it would mess up
-			# the partition table
-			if [ -e "${MOUNTPOINT}"/usr/lib/raspi-config/init_resize.sh ] ; then
-				mv "${MOUNTPOINT}"/usr/lib/raspi-config/init_resize.sh \
-				   "${MOUNTPOINT}"/usr/lib/raspi-config/init_resize.sh.bak
-			fi
-
-			# Fix the UUIDs of the boot and rootfs partitions
-			sed -i "s,PARTUUID=[0-9a-f]*-01,PARTUUID=${boot_uuid}," \
-				"${MOUNTPOINT}"/etc/fstab
-			sed -i "s,PARTUUID=[0-9a-f]*-02,PARTUUID=${rootfs_uuid}," \
-				"${MOUNTPOINT}"/etc/fstab
-
-		elif [ "${ID}" = "ubuntu" ] ; then
-			# Make sure cloud-init doesn't run growpart since it would mess up
-			# the partition table
-			sed -i '/^ - growpart/d' "${MOUNTPOINT}"/etc/cloud/cloud.cfg
-
-			# Fix the UUIDs of the boot and rootfs partitions
-			sed -i "s,LABEL=system-boot,PARTUUID=${boot_uuid}," \
-				"${MOUNTPOINT}"/etc/fstab
-			sed -i "s,LABEL=cloudimg-rootfs,PARTUUID=${rootfs_uuid}," \
-				"${MOUNTPOINT}"/etc/fstab
-
-		else
-			pr_info "Unknown OS ID: ${ID}"
-		fi
-
-		umount_dev
-
-		# Configure the OS boot partition
-		mount_dev "${dev[0]}:${boot_num}"
-		pr_info "Configuring the '${PRETTY_NAME}' OS boot partition"
-
-		sed -e "s,__BOOT__,${boot_num}," \
-			-e "s,__ROOTFS_UUID__,${rootfs_uuid}," \
-			boot/"${ID}"/boot.scr.txt > "${MOUNTPOINT}"/boot.scr.txt
-		build_uboot_scr  "${MOUNTPOINT}"/boot.scr.txt
-
-		umount_dev
-
-		# Add the OS to the multiboot menu
-		mount_dev "${dev[0]}:1"
-		pr_info "Adding '${PRETTY_NAME}' to the multiboot menu"
-
-		num=$((((boot_num - 5)) / 2))
-		sed -i "s,^.*setenv x_title${num}.*,setenv x_title${num} \"${PRETTY_NAME}\"," \
-			"${MOUNTPOINT}"/boot.scr.txt
-		build_uboot_scr "${MOUNTPOINT}"/boot.scr.txt
-
-		umount_dev
+		config_os "${1}"
 	fi
 }
 
@@ -556,11 +589,13 @@ Positional arguments:
   -h, --help     Show this help text and exit.
   -r, --dry-run  Dry run mode. If specified, no modifcations of a device/image
                  are made.
+  -u, --uboot    Use the u-boot bootlader and a u-boot multiboot bootmenu.
 EOF
 }
 
 DEBUG=0
 DRY_RUN=0
+UBOOT=0
 cmd=
 cmd_opts=()
 
@@ -575,6 +610,9 @@ while [ $# -gt 0 ] ; do
 			;;
 		-r|--dry-run)
 			DRY_RUN=1
+			;;
+		-u|--uboot)
+			UBOOT=1
 			;;
 		-*)
 			pr_error "Unexpected argument: ${1}"
