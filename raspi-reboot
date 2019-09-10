@@ -1,0 +1,129 @@
+#!/bin/bash -eu
+#
+# Reboot a Raspberry Pi into the specified OS
+#
+
+function out()
+{
+	rc=$?
+
+	trap - EXIT INT TERM HUP
+
+	if [ -n "${MOUNT1}" ] ; then
+		umount "${MOUNT1}" || umount -l "${MOUNT1}"
+		rmdir "${MOUNT1}"
+	fi
+
+	if [ -n "${MOUNT2}" ] ; then
+		umount "${MOUNT2}" || umount -l "${MOUNT2}"
+		rmdir "${MOUNT2}"
+	fi
+
+	if [ "${rc}" -ne 0 ] ; then
+		echo "Failed"
+	fi
+
+	exit "${rc}"
+}
+
+function list_oses()
+{
+	local tmpd os_num part_num dev
+
+	# Create a temporary mountpoint
+	tmpd=$(mktemp -d --tmpdir raspi-reboot-XXXXXX)
+	
+	os_num=1
+	for part_num in $(seq 6 2 100) ; do
+		dev="/dev/mmcblk0p${part_num}"
+		if ! [ -b "${dev}" ] ; then
+			break
+		fi
+
+		if mount "${dev}" "${tmpd}" >/dev/null 2>&1 ; then
+			# shellcheck disable=SC1090
+			. "${tmpd}/etc/os-release"
+			print "%-2s  %s  %-2s" "${os_num}" "${PRETTY_NAME}" "${part_num}"
+			umount "${tmpd}" 2>/dev/null || umount -l "${tmpd}"
+		fi
+		
+		os_num=$((os_num + 1))
+	done
+
+	# Remove the temporary mountpoint
+	rmdir "${tmpd}"
+}
+
+function usage()
+{
+	cat <<EOF
+Usage: raspi-reboot [-h] NUM|list
+
+Reboot the Raspberry Pi into the specified OS.
+
+Positional arguments:
+  NUM         The number of the OS to reboot into.
+  list        Show a list of the installed OSes.
+
+Optional arguments:
+  -h, --help  Show this help text and exit.
+EOF
+}
+
+os_num=
+
+while [ $# -gt 0 ] ; do
+	case "${1}" in
+		-h|--help)
+			usage
+			exit
+			;;
+		list)
+			list_oses
+			exit
+			;;
+		[0-9]+)
+			if [ -n "${os_num}" ] ; then
+				usage
+				exit 2
+			fi
+			os_num=${1}
+			;;
+		*)
+			usage
+			exit 2
+			;;
+	esac
+	shift
+done
+
+if [ -z "${os_num}" ] ; then
+	usage
+	exit 2
+fi
+
+# Calculate the OS'es boot partition number from the OS number
+boot_num=$((os_num * 2 + 3))
+
+MOUNT1=
+MOUNT2=
+trap out EXIT INT TERM HUP
+
+# Mount the disk and OS boot partitions
+MOUNT1=$(mktemp -d --tmpdir raspi-reboot-XXXXXX)
+MOUNT2=$(mktemp -d --tmpdir raspi-reboot-XXXXXX)
+mount "/dev/mmcblk0p1" "${MOUNT1}"
+mount "/dev/mmcblk0p${boot_num}""${MOUNT2}"
+
+# Sync the (new) OS boot partition to the disk boot partition
+rsync -avh --delete "${MOUNT2}"/ "${MOUNT1}"/
+
+trap - EXIT INT TERM HUP
+
+# Unmount the partitions
+umount "${MOUNT1}" || umount -l "${MOUNT1}"
+umount "${MOUNT2}" || umount -l "${MOUNT2}"
+rmdir "${MOUNT1}"
+rmdir "${MOUNT2}"
+
+reboot
