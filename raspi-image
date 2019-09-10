@@ -282,6 +282,8 @@ function config_os()
 	pr_info "Found a '${PRETTY_NAME}' OS"
 
 	# Fix /etc/fstab
+	# Raspbian: - Replace the PARTUUIDs with ours
+	# Ubuntu:   - Replace the filesystem labels with our PARTUUIDs
 	sed -i -e "s,PARTUUID=[0-9a-f]*-01,PARTUUID=${boot_uuid}," \
 		   -e  "s,LABEL=system-boot,PARTUUID=${boot_uuid}," \
 		   "${MOUNTPOINT}"/etc/fstab
@@ -289,8 +291,8 @@ function config_os()
 		   -e "s,LABEL=cloudimg-rootfs,PARTUUID=${rootfs_uuid}," \
 		   "${MOUNTPOINT}"/etc/fstab
 
-	# Inject the raspi-reboot script
-	cp raspi-reboot "${MOUNTPOINT}"/sbin/
+	# Inject the raspi-<foo> scripts
+	cp raspi-image raspi-reboot "${MOUNTPOINT}"/sbin/
 
 	umount_dev
 
@@ -300,7 +302,11 @@ function config_os()
 
 	if [ "${UBOOT}" -eq 0 ] ; then
 		# Fix cmdline.txt
+		# Raspbian: - Replace the PARTUUIDs with ours
+		#           - Don't boot into the resize script
+		# Ubuntu:   - Replace the hard-coded root device with our PARTUUID
 		sed -i -e "s,PARTUUID=[0-9a-f]*-02,PARTUUID=${rootfs_uuid}," \
+			   -e "s, init=/usr/lib/raspi-config/init_resize\.sh,," \
 			   -e "s,root=/dev/mmcblk0p2,root=PARTUUID=${rootfs_uuid}," \
 			   "${MOUNTPOINT}"/cmdline.txt
 
