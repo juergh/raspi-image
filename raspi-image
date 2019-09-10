@@ -111,6 +111,8 @@ function mount_dev()
 		# It's an image file, so attach it to a loop device
 		losetup_attach "${dev[0]}"
 		part=${LOOPDEV}p${dev[1]}
+	elif [[ "${dev[0]}" = *[0-9] ]] ; then
+		part=${dev[0]}p${dev[1]}
 	else
 		part=${dev[0]}${dev[1]}
 	fi
@@ -147,6 +149,8 @@ function format_dev()
 		# It's an image file, so attach it to a loop device
 		losetup_attach "${dev[0]}"
 		part=${LOOPDEV}p${dev[1]}
+	elif [[ "${dev[0]}" = *[0-9] ]] ; then
+		part=${dev[0]}p${dev[1]}
 	else
 		part=${dev[0]}${dev[1]}
 	fi
@@ -169,6 +173,8 @@ function label_dev()
 		# It's an image file, so attach it to a loop device
 		losetup_attach "${dev[0]}"
 		part=${LOOPDEV}p${dev[1]}
+	elif [[ "${dev[0]}" = *[0-9] ]] ; then
+		part=${dev[0]}p${dev[1]}
 	else
 		part=${dev[0]}${dev[1]}
 	fi
