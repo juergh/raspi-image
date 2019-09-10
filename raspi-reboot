@@ -28,11 +28,18 @@ function out()
 
 function list_oses()
 {
-	local tmpd os_num part_num dev
+	local fmt tmpd os_num part_num dev
+
+	# Print the header
+	fmt="%-6s  %-30s  %-9s\n"
+	# shellcheck disable=SC2059
+	printf "${fmt}" "Number" "OS Name" "Partition"
+	printf -- "-%.0s" {1..49}
+	echo
 
 	# Create a temporary mountpoint
 	tmpd=$(mktemp -d --tmpdir raspi-reboot-XXXXXX)
-	
+
 	os_num=1
 	for part_num in $(seq 6 2 100) ; do
 		dev="/dev/mmcblk0p${part_num}"
@@ -43,10 +50,11 @@ function list_oses()
 		if mount "${dev}" "${tmpd}" >/dev/null 2>&1 ; then
 			# shellcheck disable=SC1090
 			. "${tmpd}/etc/os-release"
-			print "%-2s  %s  %-2s" "${os_num}" "${PRETTY_NAME}" "${part_num}"
+			# shellcheck disable=SC2059
+			printf "${fmt}" "${os_num}" "${PRETTY_NAME}" "${part_num}"
 			umount "${tmpd}" 2>/dev/null || umount -l "${tmpd}"
 		fi
-		
+
 		os_num=$((os_num + 1))
 	done
 
@@ -113,7 +121,7 @@ trap out EXIT INT TERM HUP
 MOUNT1=$(mktemp -d --tmpdir raspi-reboot-XXXXXX)
 MOUNT2=$(mktemp -d --tmpdir raspi-reboot-XXXXXX)
 mount "/dev/mmcblk0p1" "${MOUNT1}"
-mount "/dev/mmcblk0p${boot_num}""${MOUNT2}"
+mount "/dev/mmcblk0p${boot_num}" "${MOUNT2}"
 
 # Sync the (new) OS boot partition to the disk boot partition
 rsync -avh --delete "${MOUNT2}"/ "${MOUNT1}"/
