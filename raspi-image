@@ -364,9 +364,13 @@ function config_os()
 		# Fix cmdline.txt
 		# Raspbian: - Replace the PARTUUIDs with our LABELs
 		#           - Don't boot into the resize script
+		#           - Remove quiet
+		#           - Replace serial0 with ttyAMA0
 		# Ubuntu:   - Replace the hard-coded root device with our LABEL
 		sed -i -e "s,PARTUUID=[0-9a-f]*-02,LABEL=${rootfs_label}," \
 			   -e "s, init=/usr/lib/raspi-config/init_resize\.sh,," \
+			   -e "s, quiet,," \
+			   -e "s,console=serial0,console=ttyAMA0," \
 			   -e "s,root=/dev/mmcblk0p2,root=LABEL=${rootfs_label}," \
 			   "${MOUNTPOINT}"/cmdline.txt
 
