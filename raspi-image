@@ -258,13 +258,6 @@ function config_os()
 	pr_info "Found a '${PRETTY_NAME}' OS"
 
 	if [ "${ID}" = "raspbian" ] ; then
-		# Make sure nobody can call init_resize.sh since it would mess up
-		# the partition table
-		if [ -e "${MOUNTPOINT}"/usr/lib/raspi-config/init_resize.sh ] ; then
-			mv "${MOUNTPOINT}"/usr/lib/raspi-config/init_resize.sh \
-			   "${MOUNTPOINT}"/usr/lib/raspi-config/init_resize.sh.bak
-		fi
-
 		# Fix the UUIDs of the boot and rootfs partitions
 		sed -i "s,PARTUUID=[0-9a-f]*-01,PARTUUID=${boot_uuid}," \
 			"${MOUNTPOINT}"/etc/fstab
@@ -272,10 +265,6 @@ function config_os()
 			"${MOUNTPOINT}"/etc/fstab
 
 	elif [ "${ID}" = "ubuntu" ] ; then
-		# Make sure cloud-init doesn't run growpart since it would mess up
-		# the partition table
-		sed -i '/^ - growpart/d' "${MOUNTPOINT}"/etc/cloud/cloud.cfg
-
 		# Fix the UUIDs of the boot and rootfs partitions
 		sed -i "s,LABEL=system-boot,PARTUUID=${boot_uuid}," \
 			"${MOUNTPOINT}"/etc/fstab
@@ -325,6 +314,7 @@ function init_dev()
 	local dev_size
 	local boot_start boot_size boot_type
 	local ext_start ext_size ext_type
+	local guard_start
 
 	pr_info "Initializing device ${dev}"
 
@@ -350,6 +340,9 @@ function init_dev()
 	pr_debug "ext: start ${ext_start}, size ${ext_size}," \
 			 "type ${ext_type}"
 
+	# The start of the 'guard' partition
+	guard_start=$(align "${ext_start}" 4096)
+
 	# Create the input file for sfdisk
 	cat <<EOF >sfdisk.in
 label: dos
@@ -359,6 +352,7 @@ unit: sectors
 
 ${dev}1 : start=${boot_start}, size=${boot_size}, type=${boot_type}, bootable
 ${dev}2 : start=${ext_start}, size=${ext_size}, type=${ext_type}
+${dev}5 : start=${guard_start}, size=2048, type=83
 EOF
 
 	# Update the partition table
@@ -396,7 +390,7 @@ function add_os()
 	local boot_num boot_start boot_size boot_type
 	local rootfs_num rootfs_start rootfs_size rootfs_type
 
-	# Get the (last) partition information from the device
+	# Get the guard (last) partition information from the device
 	IFS=' ' read -r -a dev_last <<< "$(probe_dev "${dev}" | tail -1)"
 	pr_debug "dev_last: ${dev_last[*]}"
 
@@ -408,15 +402,10 @@ function add_os()
 	pr_debug "img_rootfs: ${img_rootfs[*]}"
 
 	# The new OS boot partition
-	if [ "${dev_last[0]}" = "2" ] ; then
-		boot_num=5
-		boot_start=$(align "${dev_last[1]}" 4096)
-	else
-		boot_num=$((dev_last[0] + 1))
-		boot_start=$(align "$((dev_last[1] + dev_last[2]))" 4096)
-	fi
+	boot_num=${dev_last[0]}
+	boot_start=${dev_last[1]}
 	boot_size=$((BOOT_SIZE * 1024 * 1024 / 512))
-	boot_type=${img_boot[3]}
+	boot_type=c
 
 	# The new OS rootfs partition
 	rootfs_num=$((boot_num + 1))
@@ -424,10 +413,16 @@ function add_os()
 	rootfs_size=$((ROOTFS_SIZE * 1024 * 1024 / 512))
 	rootfs_type=${img_rootfs[3]}
 
-	sfdisk -d "${dev}" > sfdisk.in
+	# The new guard partition
+	guard_num=$((rootfs_num + 1))
+	guard_start=$(align "$((rootfs_start + rootfs_size))" 4096)
+
+	# Create the input file for sfdisk
+	sfdisk -d "${dev}" | head -n -1 > sfdisk.in
 	cat <<EOF >> sfdisk.in
 ${dev}${boot_num} : start=${boot_start}, size=${boot_size}, type=${boot_type}
 ${dev}${rootfs_num} : start=${rootfs_start}, size=${rootfs_size}, type=${rootfs_type}
+${dev}${guard_num} : start=${guard_start}, size=2048, type=83
 EOF
 
 	# Update the partition table
