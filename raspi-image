@@ -238,6 +238,48 @@ function copy_dev()
 	TMPDIR=
 }
 
+function dd_dev()
+{
+	local src dst dd_opts src_part dst_part
+
+	pr_info "Copying device/partition ${1} to ${2}"
+
+	IFS=':' read -r -a src <<< "${1}"
+	IFS=':' read -r -a dst <<< "${2}"
+
+	src_part=()
+	dst_part=()
+	dd_opts=("if=${src[0]}" "of=${dst[0]}" "bs=512" "conv=notrunc,fsync")
+
+	# Source partition details
+	pr_debug "src: ${src[*]}"
+	IFS=' ' read -r -a src_part < <(probe_dev "${src[0]}" | \
+										grep "^${src[1]} ")
+	pr_debug "src_part: ${src_part[*]}"
+	dd_opts+=("skip=${src_part[1]}" "count=${src_part[2]}")
+
+	# Destination partition details
+	pr_debug "dst: ${dst[*]}"
+	IFS=' ' read -r -a dst_part < <(probe_dev "${dst[0]}" | \
+										grep "^${dst[1]} ")
+	pr_debug "dst_part: ${dst_part[*]}"
+	dd_opts+=("seek=${dst_part[1]}")
+
+	pr_debug "dd_opts: ${dd_opts[*]}"
+
+	# Check that the destination partition is big enough
+	if [ "${#src_part[@]}" -gt 1 ] && [ "${#dst_part[@]}" -gt 1 ] && \
+		   [ "${src_part[2]}" -gt "${dst_part[2]}" ] ; then
+		pr_error "Destination partition is too small"
+	fi
+
+	# Exit if this is a dry-run
+	dry_run_exit
+
+	# Copy the partition
+	dd "${dd_opts[@]}"
+}
+
 function build_uboot_scr()
 {
 	local script=${1}
@@ -520,52 +562,6 @@ function config_dev()
 	fi
 }
 
-function dd_dev()
-{
-	local src dst dd_opts src_part dst_part
-
-	pr_info "Copying device/partition ${1} to ${2}"
-
-	IFS=':' read -r -a src <<< "${1}"
-	IFS=':' read -r -a dst <<< "${2}"
-
-	src_part=()
-	dst_part=()
-	dd_opts=("if=${src[0]}" "of=${dst[0]}" "bs=512" "conv=notrunc,fsync")
-
-	pr_debug "src: ${src[*]}"
-	if [ "${#src[@]}" -eq 2 ] ; then
-		# Source partition number specified, get the partition details
-		IFS=' ' read -r -a src_part < <(probe_dev "${src[0]}" | \
-											grep "^${src[1]} ")
-		pr_debug "src_part: ${src_part[*]}"
-		dd_opts+=("skip=${src_part[1]}" "count=${src_part[2]}")
-	fi
-
-	pr_debug "dst: ${dst[*]}"
-	if [ "${#dst[@]}" -eq 2 ] ; then
-		# Destination partition number specified, get the partition details
-		IFS=' ' read -r -a dst_part < <(probe_dev "${dst[0]}" | \
-											grep "^${dst[1]} ")
-		pr_debug "dst_part: ${dst_part[*]}"
-		dd_opts+=("seek=${dst_part[1]}")
-	fi
-
-	pr_debug "dd_opts: ${dd_opts[*]}"
-
-	# Check that the destination partition is big enough
-	if [ "${#src_part[@]}" -gt 1 ] && [ "${#dst_part[@]}" -gt 1 ] && \
-		   [ "${src_part[2]}" -gt "${dst_part[2]}" ] ; then
-		pr_error "Destination partition is too small"
-	fi
-
-	# Exit if this is a dry-run
-	dry_run_exit
-
-	# Copy the partition
-	dd "${dd_opts[@]}"
-}
-
 # -----------------------------------------------------------------------------
 # Commands
 
@@ -599,16 +595,6 @@ function do_config()
 	config_dev "${@}"
 }
 
-function do_dd()
-{
-	if [ $# -ne 2 ] ; then
-		usage
-		exit 2
-	fi
-
-	dd_dev "${@}"
-}
-
 function usage()
 {
 	trap - EXIT INT TERM HUP
@@ -623,10 +609,6 @@ Supported commands
   config DEVICE[:PARTITION]
                  Configure partition PARTITION of device DEVICE. If not
                  specified, PARTITION defaults to 1.
-  dd DEVICE1[:PARTITION1] DEVICE2[:PARTITION2]
-                 Copy DEVICE1 to DEVICE2 using 'dd'. Operate on a partition
-                 rather than a whole device if a PARTITIION number is
-                 specified.
 
 Positional arguments:
   -d, --debug    Enable debugging output.
@@ -684,7 +666,7 @@ while [ $# -gt 0 ] ; do
 done
 
 case "${cmd}" in
-	init|config|add|dd)
+	init|add|config)
 		true
 		;;
 	*)
