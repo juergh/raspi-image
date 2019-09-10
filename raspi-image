@@ -212,7 +212,7 @@ function sfdisk_dev()
 
 	# Re-read the modified partition table
 	if [ -b "${dev}" ] ; then
-		partx -u "${dev}"
+		partprobe -s "${dev}"
 	fi
 }
 
