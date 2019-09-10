@@ -67,6 +67,19 @@ function align()
 	echo $(((val / align + 1) * align))
 }
 
+function part_name()
+{
+	local dev
+
+	IFS=':' read -r -a dev <<< "${1}"
+
+	if [[ "${dev[0]}" = *[0-9] ]] ; then
+		echo "${dev[0]}p${dev[1]}"
+	else
+		echo "${dev[0]}${dev[1]}"
+	fi
+}
+
 function probe_dev()
 {
 	local dev=${1}
@@ -101,7 +114,7 @@ function losetup_detach()
 
 function mount_dev()
 {
-	local dev part
+	local dev
 
 	pr_info "Mounting ${1}"
 
@@ -110,15 +123,11 @@ function mount_dev()
 	if [ -f "${dev[0]}" ] ; then
 		# It's an image file, so attach it to a loop device
 		losetup_attach "${dev[0]}"
-		part=${LOOPDEV}p${dev[1]}
-	elif [[ "${dev[0]}" = *[0-9] ]] ; then
-		part=${dev[0]}p${dev[1]}
-	else
-		part=${dev[0]}${dev[1]}
+		dev[0]=${LOOPDEV}
 	fi
 
 	MOUNTPOINT=$(mktemp -d --tmpdir raspi-image-XXXXXX)
-	mount "${part}" "${MOUNTPOINT}"
+	mount "$(part_name "${dev[0]}:${dev[1]}")" "${MOUNTPOINT}"
 }
 
 function umount_dev()
@@ -148,14 +157,10 @@ function format_dev()
 	if [ -f "${dev[0]}" ] ; then
 		# It's an image file, so attach it to a loop device
 		losetup_attach "${dev[0]}"
-		part=${LOOPDEV}p${dev[1]}
-	elif [[ "${dev[0]}" = *[0-9] ]] ; then
-		part=${dev[0]}p${dev[1]}
-	else
-		part=${dev[0]}${dev[1]}
+		dev[0]=${LOOPDEV}
 	fi
 
-	"mkfs.${fstype}" -n "${label}" "${part}"
+	"mkfs.${fstype}" -n "${label}" "$(part_name "${dev[0]}:${dev[1]}")"
 
 	losetup_detach
 }
@@ -172,14 +177,10 @@ function label_dev()
 	if [ -f "${dev[0]}" ] ; then
 		# It's an image file, so attach it to a loop device
 		losetup_attach "${dev[0]}"
-		part=${LOOPDEV}p${dev[1]}
-	elif [[ "${dev[0]}" = *[0-9] ]] ; then
-		part=${dev[0]}p${dev[1]}
-	else
-		part=${dev[0]}${dev[1]}
+		dev[0]=${LOOPDEV}
 	fi
 
-	"${fstype}label" "${part}" "${label}"
+	"${fstype}label" "$(part_name "${dev[0]}:${dev[1]}")" "${label}"
 
 	losetup_detach
 }
@@ -187,6 +188,7 @@ function label_dev()
 function sfdisk_dev()
 {
 	local dev=${1} sfdisk_in=${2}
+	local opts
 
 	pr_info "Updating the partition table of ${dev}"
 
@@ -196,13 +198,17 @@ function sfdisk_dev()
 	fi
 	dry_run_exit
 
-	# Update the partition table
-	if [ "${DEBUG}" -eq 1 ] ; then
-		sfdisk "${dev}" < "${sfdisk_in}"
-	else
-		sfdisk -q "${dev}" < "${sfdisk_in}"
-		sfdisk -l "${dev}"
+	# Options for sfdisk
+	opts=()
+	if [ "${FORCE}" -eq 1 ] ; then
+		opts+=("-f")
 	fi
+	if [ "${DEBUG}" -eq 0 ] ; then
+		opts+=("-q")
+	fi
+
+	# Update the partition table
+	sfdisk "${opts[@]}" "${dev}" < "${sfdisk_in}"
 
 	# Re-read the modified partition table
 	if [ -b "${dev}" ] ; then
@@ -356,9 +362,9 @@ function init_dev()
 {
 	local dev=${1}
 	local dev_size
-	local boot_start boot_size boot_type
-	local ext_start ext_size ext_type
-	local guard_start
+	local boot_part boot_start boot_size boot_type
+	local ext_part ext_start ext_size ext_type
+	local guard_part guard_start
 
 	pr_info "Initializing device ${dev}"
 
@@ -371,6 +377,7 @@ function init_dev()
 	pr_debug "dev_size: ${dev_size}"
 
 	# The (custom/multiboot) boot partition
+	boot_part=$(part_name "${dev}:1}")
 	boot_start=${BOOT_START}
 	boot_size=$((BOOT_SIZE * 1024 * 1024 / 512))
 	boot_type=c
@@ -378,6 +385,7 @@ function init_dev()
 			 "type ${boot_type}"
 
 	# The extended partition
+	ext_part=$(part_name "${dev}:2}")
 	ext_start=$(align "$((boot_start + boot_size))" 4096)
 	ext_size=$((dev_size - ext_start))
 	ext_type=5
@@ -385,6 +393,7 @@ function init_dev()
 			 "type ${ext_type}"
 
 	# The start of the 'guard' partition
+	guard_part=$(part_name "${dev}:5}")
 	guard_start=$(align "${ext_start}" 4096)
 
 	# Create the input file for sfdisk
@@ -394,9 +403,9 @@ label-id: 0x${DISK_UUID}
 device: ${dev}
 unit: sectors
 
-${dev}1 : start=${boot_start}, size=${boot_size}, type=${boot_type}, bootable
-${dev}2 : start=${ext_start}, size=${ext_size}, type=${ext_type}
-${dev}5 : start=${guard_start}, size=2048, type=83
+${boot_part} : start=${boot_start}, size=${boot_size}, type=${boot_type}, bootable
+${ext_part} : start=${ext_start}, size=${ext_size}, type=${ext_type}
+${guard_part} : start=${guard_start}, size=2048, type=83
 EOF
 
 	# Update the partition table
@@ -431,8 +440,9 @@ function add_os()
 {
 	local dev=${1} img=${2}
 	local dev_last img_parts img_boot img_rootfs
-	local boot_num boot_start boot_size boot_type
-	local rootfs_num rootfs_start rootfs_size rootfs_type
+	local boot_num boot_part boot_start boot_size boot_type
+	local rootfs_num rootfs_part rootfs_start rootfs_size rootfs_type
+	local guard_num guard_part guard_start
 
 	# Get the guard (last) partition information from the device
 	IFS=' ' read -r -a dev_last <<< "$(probe_dev "${dev}" | tail -1)"
@@ -447,26 +457,29 @@ function add_os()
 
 	# The new OS boot partition
 	boot_num=${dev_last[0]}
+	boot_part=$(part_name "${dev}:${boot_num}")
 	boot_start=${dev_last[1]}
 	boot_size=$((BOOT_SIZE * 1024 * 1024 / 512))
 	boot_type=c
 
 	# The new OS rootfs partition
 	rootfs_num=$((boot_num + 1))
+	rootfs_part=$(part_name "${dev}:${rootfs_num}")
 	rootfs_start=$(align "$((boot_start + boot_size))" 4096)
 	rootfs_size=$((ROOTFS_SIZE * 1024 * 1024 / 512))
 	rootfs_type=${img_rootfs[3]}
 
 	# The new guard partition
 	guard_num=$((rootfs_num + 1))
+	guard_part=$(part_name "${dev}:${guard_num}")
 	guard_start=$(align "$((rootfs_start + rootfs_size))" 4096)
 
 	# Create the input file for sfdisk
 	sfdisk -d "${dev}" | head -n -1 > sfdisk.in
 	cat <<EOF >> sfdisk.in
-${dev}${boot_num} : start=${boot_start}, size=${boot_size}, type=${boot_type}
-${dev}${rootfs_num} : start=${rootfs_start}, size=${rootfs_size}, type=${rootfs_type}
-${dev}${guard_num} : start=${guard_start}, size=2048, type=83
+${boot_part} : start=${boot_start}, size=${boot_size}, type=${boot_type}
+${rootfs_part} : start=${rootfs_start}, size=${rootfs_size}, type=${rootfs_type}
+${guard_part} : start=${guard_start}, size=2048, type=83
 EOF
 
 	# Update the partition table
@@ -617,6 +630,7 @@ Supported commands
 
 Positional arguments:
   -d, --debug    Enable debugging output.
+  -f, --force    Disable consistency checks.
   -h, --help     Show this help text and exit.
   -r, --dry-run  Dry run mode. If specified, no modifcations of a device/image
                  are made.
@@ -634,6 +648,7 @@ fi
 
 DEBUG=0
 DRY_RUN=0
+FORCE=0
 UBOOT=0
 cmd=
 cmd_opts=()
@@ -642,6 +657,9 @@ while [ $# -gt 0 ] ; do
 	case "${1}" in
 		-d|--debug)
 			DEBUG=1
+			;;
+		-f|--force)
+			FORCE=1
 			;;
 		-h|--help)
 			usage
