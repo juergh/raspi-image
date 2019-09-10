@@ -3,8 +3,6 @@
 # Build and manipulate a Raspberry Pi image
 #
 
-DISK_UUID="deadbeef"
-
 BOOT_START=2048   # Starting sector of boot partition
 BOOT_SIZE=128     # Boot partition size (in MB)
 
@@ -318,15 +316,15 @@ function config_boot()
 
 function config_os()
 {
-	local dev boot_num boot_uuid rootfs_num rootfs_uuid num
+	local dev boot_num boot_label rootfs_num rootfs_label num
 
 	IFS=':' read -r -a dev <<< "${1}"
 
-	# The boot and rootfs partition numbers and UUIDs
+	# The boot and rootfs partition numbers and labels
 	boot_num=${dev[1]}
-	boot_uuid=$(printf "%s-%02d" "${DISK_UUID}" "${boot_num}")
+	boot_label="boot-${boot_num}"
 	rootfs_num=$((boot_num + 1))
-	rootfs_uuid=$(printf "%s-%02d" "${DISK_UUID}" "${rootfs_num}")
+	rootfs_label="rootfs-${rootfs_num}"
 
 	# Configure the OS rootfs partition
 	pr_info "Configuring the OS rootfs partition ${dev[0]}:${rootfs_num}"
@@ -338,13 +336,13 @@ function config_os()
 	pr_info "Found a '${PRETTY_NAME}' OS"
 
 	# Fix /etc/fstab
-	# Raspbian: - Replace the PARTUUIDs with ours
-	# Ubuntu:   - Replace the filesystem labels with our PARTUUIDs
-	sed -i -e "s,PARTUUID=[0-9a-f]*-01,PARTUUID=${boot_uuid}," \
-		   -e  "s,LABEL=system-boot,PARTUUID=${boot_uuid}," \
+	# Raspbian: - Replace the PARTUUIDs with our LABELs
+	# Ubuntu:   - Replace the filesystem labels with our LABELs
+	sed -i -e "s,PARTUUID=[0-9a-f]*-01,LABEL=${boot_label}," \
+		   -e  "s,LABEL=system-boot,LABEL=${boot_label}," \
 		   "${MOUNTPOINT}"/etc/fstab
-	sed -i -e "s,PARTUUID=[0-9a-f]*-02,PARTUUID=${rootfs_uuid}," \
-		   -e "s,LABEL=cloudimg-rootfs,PARTUUID=${rootfs_uuid}," \
+	sed -i -e "s,PARTUUID=[0-9a-f]*-02,LABEL=${rootfs_label}," \
+		   -e "s,LABEL=cloudimg-rootfs,LABEL=${rootfs_label}," \
 		   "${MOUNTPOINT}"/etc/fstab
 
 	# Inject the raspi-<foo> scripts
@@ -358,18 +356,18 @@ function config_os()
 
 	if [ "${UBOOT}" -eq 0 ] ; then
 		# Fix cmdline.txt
-		# Raspbian: - Replace the PARTUUIDs with ours
+		# Raspbian: - Replace the PARTUUIDs with our LABELs
 		#           - Don't boot into the resize script
-		# Ubuntu:   - Replace the hard-coded root device with our PARTUUID
-		sed -i -e "s,PARTUUID=[0-9a-f]*-02,PARTUUID=${rootfs_uuid}," \
+		# Ubuntu:   - Replace the hard-coded root device with our LABEL
+		sed -i -e "s,PARTUUID=[0-9a-f]*-02,LABEL=${rootfs_label}," \
 			   -e "s, init=/usr/lib/raspi-config/init_resize\.sh,," \
-			   -e "s,root=/dev/mmcblk0p2,root=PARTUUID=${rootfs_uuid}," \
+			   -e "s,root=/dev/mmcblk0p2,root=LABEL=${rootfs_label}," \
 			   "${MOUNTPOINT}"/cmdline.txt
 
 	else
 		# Copy (and build) the u-boot boot script
-		sed -e "s,__BOOT__,${boot_num}," \
-			-e "s,__ROOTFS_UUID__,${rootfs_uuid}," \
+		sed -e "s,__BOOT_NUM__,${boot_num}," \
+			-e "s,__ROOTFS_LABEL__,${rootfs_label}," \
 			boot/"${ID}"/boot.scr.txt > "${MOUNTPOINT}"/boot.scr.txt
 		build_uboot_scr  "${MOUNTPOINT}"/boot.scr.txt
 	fi
@@ -443,7 +441,6 @@ function init_dev()
 	# Create the input file for sfdisk
 	cat <<EOF >sfdisk.in
 label: dos
-label-id: 0x${DISK_UUID}
 device: ${dev}
 unit: sectors
 
