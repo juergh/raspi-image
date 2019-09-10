@@ -183,7 +183,7 @@ function label_dev()
 	losetup_detach
 }
 
-function __shellcheck() { local dev;}   # Hack to silence shellcheck
+function __shellcheck() { local dev; }   # Hack to silence shellcheck
 
 function sfdisk_dev()
 {
@@ -213,6 +213,9 @@ function sfdisk_dev()
 	# Re-read the modified partition table
 	if [ -b "${dev}" ] ; then
 		partprobe -s "${dev}"
+
+		# FIXME: (juergh) A subsequent call of format_dev might fail, so wait some
+		sleep 2
 	fi
 }
 
@@ -278,6 +281,9 @@ function dd_dev()
 
 	# Copy the partition
 	dd "${dd_opts[@]}"
+
+	# FIXME: (juergh) A subsequent call of label_dev might fail, so wait some
+	sleep 2
 }
 
 function build_uboot_scr()
@@ -419,7 +425,7 @@ function init_dev()
 	pr_debug "dev_size: ${dev_size}"
 
 	# The (custom/multiboot) boot partition
-	boot_part=$(part_name "${dev}:1}")
+	boot_part=$(part_name "${dev}:1")
 	boot_start=${BOOT_START}
 	boot_size=$((BOOT_SIZE * 1024 * 1024 / 512))
 	boot_type=c
@@ -427,7 +433,7 @@ function init_dev()
 			 "type ${boot_type}"
 
 	# The extended partition
-	ext_part=$(part_name "${dev}:2}")
+	ext_part=$(part_name "${dev}:2")
 	ext_start=$(align "$((boot_start + boot_size))" 4096)
 	ext_size=$((dev_size - ext_start))
 	ext_type=5
@@ -435,7 +441,7 @@ function init_dev()
 			 "type ${ext_type}"
 
 	# The start of the 'guard' partition
-	guard_part=$(part_name "${dev}:5}")
+	guard_part=$(part_name "${dev}:5")
 	guard_start=$(align "${ext_start}" 4096)
 
 	# Create the input file for sfdisk
