@@ -65,16 +65,16 @@ function list_oses()
 function usage()
 {
 	cat <<EOF
-Usage: raspi-reboot [-h] NUM|list
+Usage: raspi-reboot [-h] [-l] NUM
 
 Reboot the Raspberry Pi into the specified OS.
 
 Positional arguments:
   NUM         The number of the OS to reboot into.
-  list        Show a list of the installed OSes.
 
 Optional arguments:
   -h, --help  Show this help text and exit.
+  -l, --list  Show the list of installed OSes and exit.
 EOF
 }
 
@@ -94,7 +94,7 @@ while [ $# -gt 0 ] ; do
 			usage
 			exit
 			;;
-		list)
+		-l|--list)
 			list_oses
 			exit
 			;;
