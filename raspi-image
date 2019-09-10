@@ -185,6 +185,8 @@ function label_dev()
 	losetup_detach
 }
 
+function __shellcheck() { local dev;}   # Hack to silence shellcheck
+
 function sfdisk_dev()
 {
 	local dev=${1} sfdisk_in=${2}
