@@ -506,7 +506,7 @@ function dd_dev()
 
 	src_part=()
 	dst_part=()
-	dd_opts=("if=${src[0]}" "of=${dst[0]}" "bs=512" "conv=notrunc")
+	dd_opts=("if=${src[0]}" "of=${dst[0]}" "bs=512" "conv=notrunc,fsync")
 
 	pr_debug "src: ${src[*]}"
 	if [ "${#src[@]}" -eq 2 ] ; then
