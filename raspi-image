@@ -289,6 +289,9 @@ function config_os()
 		   -e "s,LABEL=cloudimg-rootfs,PARTUUID=${rootfs_uuid}," \
 		   "${MOUNTPOINT}"/etc/fstab
 
+	# Inject the raspi-reboot script
+	cp raspi-reboot "${MOUNTPOINT}"/sbin/
+
 	umount_dev
 
 	# Configure the OS boot partition
