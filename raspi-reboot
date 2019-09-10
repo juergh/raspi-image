@@ -113,6 +113,11 @@ fi
 # Calculate the OS'es boot partition number from the OS number
 boot_num=$((os_num * 2 + 3))
 
+if ! [ -b "/dev/mmcblk0p${boot_num}" ] ; then
+	echo "Invalid OS number"
+	exit 1
+fi
+
 MOUNT1=
 MOUNT2=
 trap out EXIT INT TERM HUP
