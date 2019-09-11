@@ -3,6 +3,8 @@
 # Build and manipulate a Raspberry Pi image
 #
 
+DISK_UUID=0xdeadbeef
+
 BOOT_START=2048   # Starting sector of boot partition
 BOOT_SIZE=128     # Boot partition size (in MB)
 
@@ -331,6 +333,7 @@ function config_os()
 	boot_label="boot-${boot_num}"
 	rootfs_num=$((boot_num + 1))
 	rootfs_label="rootfs-${rootfs_num}"
+	rootfs_part=$(part_name "${dev[0]}:${rootfs_num}")
 
 	# Configure the OS rootfs partition
 	pr_info "Configuring the OS rootfs partition ${dev[0]}:${rootfs_num}"
@@ -362,16 +365,16 @@ function config_os()
 
 	if [ "${UBOOT}" -eq 0 ] ; then
 		# Fix cmdline.txt
-		# Raspbian: - Replace the PARTUUIDs with our LABELs
+		# Raspbian: - Fix the root device
 		#           - Don't boot into the resize script
 		#           - Remove quiet
-		#           - Replace serial0 with ttyAMA0
-		# Ubuntu:   - Replace the hard-coded root device with our LABEL
-		sed -i -e "s,PARTUUID=[0-9a-f]*-02,LABEL=${rootfs_label}," \
+		#           - Fix the serial console (serial0 -> ttyAMA0)
+		# Ubuntu:   - Fix the root device
+		sed -i -e "s,root=PARTUUID=[0-9a-f]*-02,root=${rootfs_part}," \
 			   -e "s, init=/usr/lib/raspi-config/init_resize\.sh,," \
 			   -e "s, quiet,," \
 			   -e "s,console=serial0,console=ttyAMA0," \
-			   -e "s,root=/dev/mmcblk0p2,root=LABEL=${rootfs_label}," \
+			   -e "s,root=/dev/mmcblk0p2,root=${rootfs_part}," \
 			   "${MOUNTPOINT}"/cmdline.txt
 
 	else
