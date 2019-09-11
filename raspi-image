@@ -3,7 +3,7 @@
 # Build and manipulate a Raspberry Pi image
 #
 
-DISK_UUID=0xdeadbeef
+DISK_UUID=deadbeef
 
 BOOT_START=2048   # Starting sector of boot partition
 BOOT_SIZE=128     # Boot partition size (in MB)
@@ -212,6 +212,11 @@ function sfdisk_dev()
 	# Update the partition table
 	sfdisk "${opts[@]}" "${dev}" < "${sfdisk_in}"
 
+	# Rewrite the partition table to make sure the disk ID is correct
+	sfdisk -d "${dev}" > sfdisk.dump
+	sed -i "s,^label-id: .*,label-id: 0x${DISK_UUID}," sfdisk.dump
+	sfdisk "${opts[@]}" "${dev}" < sfdisk.dump
+
 	# Re-read the modified partition table
 	if [ -b "${dev}" ] ; then
 		partprobe -s "${dev}"
@@ -324,16 +329,15 @@ function config_boot()
 
 function config_os()
 {
-	local dev boot_num boot_label rootfs_num rootfs_label num
+	local dev boot_num boot_uuid rootfs_num rootfs_uuid num
 
 	IFS=':' read -r -a dev <<< "${1}"
 
 	# The boot and rootfs partition numbers and labels
 	boot_num=${dev[1]}
-	boot_label="boot-${boot_num}"
+	boot_uuid=$(printf "%s-%02d" "${DISK_UUID}" "${boot_num}")
 	rootfs_num=$((boot_num + 1))
-	rootfs_label="rootfs-${rootfs_num}"
-	rootfs_part=$(part_name "${dev[0]}:${rootfs_num}")
+	rootfs_uuid=$(printf "%s-%02d" "${DISK_UUID}" "${rootfs_num}")
 
 	# Configure the OS rootfs partition
 	pr_info "Configuring the OS rootfs partition ${dev[0]}:${rootfs_num}"
@@ -345,13 +349,13 @@ function config_os()
 	pr_info "Found a '${PRETTY_NAME}' OS"
 
 	# Fix /etc/fstab
-	# Raspbian: - Replace the PARTUUIDs with our LABELs
-	# Ubuntu:   - Replace the filesystem labels with our LABELs
-	sed -i -e "s,PARTUUID=[0-9a-f]*-01,LABEL=${boot_label}," \
-		   -e  "s,LABEL=system-boot,LABEL=${boot_label}," \
+	# Raspbian: - Fix the PARTUUIDs
+	# Ubuntu:   - Replace the filesystem labels with PARTUUIDs
+	sed -i -e "s,PARTUUID=[0-9a-f]*-01,PARTUUID=${boot_uuid}," \
+		   -e "s,LABEL=system-boot,PARTUUID=${boot_uuid}," \
 		   "${MOUNTPOINT}"/etc/fstab
-	sed -i -e "s,PARTUUID=[0-9a-f]*-02,LABEL=${rootfs_label}," \
-		   -e "s,LABEL=cloudimg-rootfs,LABEL=${rootfs_label}," \
+	sed -i -e "s,PARTUUID=[0-9a-f]*-02,PARTUUID=${rootfs_uuid}," \
+		   -e "s,LABEL=cloudimg-rootfs,PARTUUID=${rootfs_uuid}," \
 		   "${MOUNTPOINT}"/etc/fstab
 
 	# Inject the raspi-<foo> scripts
@@ -370,17 +374,17 @@ function config_os()
 		#           - Remove quiet
 		#           - Fix the serial console (serial0 -> ttyAMA0)
 		# Ubuntu:   - Fix the root device
-		sed -i -e "s,root=PARTUUID=[0-9a-f]*-02,root=${rootfs_part}," \
+		sed -i -e "s,PARTUUID=[0-9a-f]*-02,PARTUUID=${rootfs_uuid}," \
 			   -e "s, init=/usr/lib/raspi-config/init_resize\.sh,," \
 			   -e "s, quiet,," \
 			   -e "s,console=serial0,console=ttyAMA0," \
-			   -e "s,root=/dev/mmcblk0p2,root=${rootfs_part}," \
+			   -e "s,root=/dev/mmcblk0p2,root=PARTUUID=${rootfs_uuid}," \
 			   "${MOUNTPOINT}"/cmdline.txt
 
 	else
 		# Copy (and build) the u-boot boot script
 		sed -e "s,__BOOT_NUM__,${boot_num}," \
-			-e "s,__ROOTFS_LABEL__,${rootfs_label}," \
+			-e "s,__ROOTFS_UUID__,${rootfs_uuid}," \
 			boot/"${ID}"/boot.scr.txt > "${MOUNTPOINT}"/boot.scr.txt
 		build_uboot_scr  "${MOUNTPOINT}"/boot.scr.txt
 	fi
@@ -454,6 +458,7 @@ function init_dev()
 	# Create the input file for sfdisk
 	cat <<EOF >sfdisk.in
 label: dos
+label-id: 0x${DISK_UUID}
 device: ${dev}
 unit: sectors
 

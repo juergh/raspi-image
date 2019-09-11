@@ -7,6 +7,6 @@ fatload mmc 0:__BOOT_NUM__ ${kernel_addr_r} vmlinuz
 fatload mmc 0:__BOOT_NUM__ ${ramdisk_addr_r} initrd.img
 setenv initrdsize $filesize
 
-setenv bootargs net.ifnames=0 dwc_otg.lpm_enable=0 console=ttyAMA0,115200 console=tty1 root=LABEL=__ROOTFS_LABEL__ rootfstype=ext4 elevator=deadline rootwait
+setenv bootargs net.ifnames=0 dwc_otg.lpm_enable=0 console=ttyAMA0,115200 console=tty1 root=PARTUUID=__ROOTFS_UUID__ rootfstype=ext4 elevator=deadline rootwait
 
 bootz ${kernel_addr_r} ${ramdisk_addr_r}:${initrdsize} ${fdt_addr}
