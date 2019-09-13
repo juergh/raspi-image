@@ -1,0 +1,196 @@
+#!/bin/bash -eu
+#
+# Run a Raspberry OS image in QEMU
+#
+
+function out()
+{
+	local rc=${?}
+
+	umount_dev
+	rm_tmpdir
+
+	if [ "${rc}" -ne 0 ] ; then
+		echo "Script failed" >&2
+	fi
+
+	exit "${rc}"
+}
+
+function mount_dev()
+{
+	local img part
+
+	IFS=':' read -r img part <<< "${1}"
+
+	LOOPDEV=$(sudo losetup --show --partscan --find "${img}")
+	sleep 1
+
+	MOUNTPOINT=$(mktemp -d --tmp qemu-raspi-XXXXXX)
+	sudo mount "${LOOPDEV}p${part}" "${MOUNTPOINT}"
+}
+
+function umount_dev()
+{
+	if [ -n "${MOUNTPOINT}" ] ; then
+		if sudo umount "${MOUNTPOINT}" || sudo umount -l "${MOUNTPOINT}" ; then
+			rmdir "${MOUNTPOINT}"
+		fi
+		MOUNTPOINT=
+	fi
+
+	if [ -n "${LOOPDEV}" ] ; then
+		sudo losetup --detach "${LOOPDEV}"
+		LOOPDEV=
+	fi
+}
+
+function mk_tmpdir()
+{
+	TMPDIR=$(mktemp -d --tmp qemu-raspi-XXXXXX)
+}
+
+function rm_tmpdir()
+{
+	if [ -n "${TMPDIR}" ] ; then
+		rm -rf "${TMPDIR}"
+	fi
+}
+
+function usage()
+{
+        cat <<EOF
+Usage: qemu-raspi [-h] [-m MACHINE] IMAGE
+
+Positional arguments:
+  IMAGE   The image file containing the OS to run.
+
+Optional arguments:
+  -h, --help              Show this help text and exit.
+  -m, --machine MACHINE   The machine type to use (raspi2, raspi3). Defaults to
+                          'raspi2', if not specified.
+EOF
+}
+
+image=
+machine=raspi2
+
+while [ $# -ne 0 ] ; do
+    case "${1}" in
+        -h|--help)
+            usage
+            exit
+            ;;
+		-m|--machine)
+			shift
+			machine=${1}
+			;;
+        *)
+            if [ -n "${image}" ] ; then
+                echo "Unexpected argument: ${1}" >&2
+                exit 2
+            fi
+            image=$(readlink -f "${1}")
+            ;;
+    esac
+    shift
+done
+
+if [ -z "${image}" ] ; then
+    usage >&2
+    exit 2
+fi
+
+if ! [ -f "${image}" ] ; then
+    echo "No such image file: ${image}" >&2
+    exit 1
+fi
+
+declare -A kernels initrds
+
+case "${machine}" in
+	raspi2)
+		qemu="qemu-system-arm"
+		dtb="bcm2709-rpi-2-b.dtb"
+
+		# Raspbian
+		kernels[raspbian]=kernel7l.img
+		initrds[raspbian]=
+
+		# Ubuntu
+		kernels[ubuntu]=vmlinuz
+		initrds[ubuntu]=initrd.img
+		;;
+
+	raspi3)
+		qemu="qemu-system-aarch64"
+        dtb="bcm2710-rpi-3-b.dtb"
+		;;
+
+	*)
+		echo "Invalid machine: ${machine}" >&2
+		exit 1
+		;;
+esac
+
+echo "machine: ${machine}"
+echo "qemu:    ${qemu}"
+echo "dtb:     ${dtb}"
+
+LOOPDEV=
+MOUNTPOINT=
+TMPDIR=
+trap out EXIT INT TERM HUP
+
+mount_dev "${image}:2"
+# shellcheck disable=SC1090
+. "${MOUNTPOINT}"/etc/os-release
+umount_dev
+
+kernel=${kernels[${ID}]}
+initrd=${initrds[${ID}]}
+
+echo "OS:      ${PRETTY_NAME}"
+echo "OS ID:   ${ID}"
+echo "kernel:  ${kernel}"
+echo "initrd:  ${initrd}"
+
+mk_tmpdir
+
+# Copy the kernel, dtb, and initrd from the OS rootfs partition to the
+# temporary directory
+mount_dev "${image}:1"
+cp "${MOUNTPOINT}/${kernel}" "${MOUNTPOINT}/${dtb}" "${TMPDIR}"/
+if [ -n "${initrd}" ] ; then
+	cp "${MOUNTPOINT}/${initrd}" "${TMPDIR}"/
+fi
+umount_dev
+
+# Create a temporary disk image using the provided image file as a backing
+# file, so that we don't modify the original image
+qemu-img create -f qcow2 -b "${image}" "${TMPDIR}/disk.qcow2" 8G
+
+# Assemble the qemu options
+qemu_opts=(
+	"-M" "${machine}"
+	"-m" "1G"
+	"-smp" "4"
+	"-no-reboot"
+	"-nographic"
+	"-drive" "file=${TMPDIR}/disk.qcow2,format=qcow2,if=sd"
+	"-kernel" "${TMPDIR}/${kernel}"
+	"-dtb" "${TMPDIR}/${dtb}"
+	"-append" "rw earlyprintk loglevel=8 console=ttyAMA0 root=/dev/mmcblk0p2 fsck.repair=yes rootwait"
+)
+
+if [ -n "${initrd}" ] ; then
+	qemu_opts+=("-initrd" "${TMPDIR}/${initrd}")
+fi
+
+echo
+echo "${qemu} ${qemu_opts[*]}"
+
+echo
+"${qemu}" "${qemu_opts[@]}"
+
+rm_tmpdir
