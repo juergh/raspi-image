@@ -162,10 +162,10 @@ umount_dev
 kernel=${kernels[${ID}]}
 initrd=${initrds[${ID}]}
 
-echo "OS:      ${PRETTY_NAME}"
-echo "OS ID:   ${ID}"
-echo "kernel:  ${kernel}"
-echo "initrd:  ${initrd}"
+echo "OS pretty name:   ${PRETTY_NAME}"
+echo "OS ID:            ${ID}"
+echo "kernel:           ${kernel}"
+echo "initrd:           ${initrd}"
 
 mk_tmpdir
 
