@@ -66,17 +66,24 @@ Positional arguments:
   IMAGE   The image file containing the OS to run.
 
 Optional arguments:
+  -b, --boot NUM          The number of the boot partition. Defaults to 1, if
+                          not specified.
   -h, --help              Show this help text and exit.
   -m, --machine MACHINE   The machine type to use (raspi2, raspi3). Defaults to
                           'raspi2', if not specified.
 EOF
 }
 
+boot_num=1
 image=
 machine=raspi2
 
 while [ $# -ne 0 ] ; do
     case "${1}" in
+		-b|--boot)
+			shift
+			boot_num=${1}
+			;;
         -h|--help)
             usage
             exit
@@ -133,16 +140,21 @@ case "${machine}" in
 		;;
 esac
 
-echo "machine: ${machine}"
-echo "qemu:    ${qemu}"
-echo "dtb:     ${dtb}"
+# The number of the rootfs partition
+rootfs_num=$((boot_num + 1))
+
+echo "machine:          ${machine}"
+echo "qemu:             ${qemu}"
+echo "dtb:              ${dtb}"
+echo "boot partition:   ${boot_num}"
+echo "rootfs partition: ${rootfs_num}"
 
 LOOPDEV=
 MOUNTPOINT=
 TMPDIR=
 trap out EXIT INT TERM HUP
 
-mount_dev "${image}:2"
+mount_dev "${image}:${rootfs_num}"
 # shellcheck disable=SC1090
 . "${MOUNTPOINT}"/etc/os-release
 umount_dev
@@ -159,7 +171,7 @@ mk_tmpdir
 
 # Copy the kernel, dtb, and initrd from the OS rootfs partition to the
 # temporary directory
-mount_dev "${image}:1"
+mount_dev "${image}:${boot_num}"
 cp "${MOUNTPOINT}/${kernel}" "${MOUNTPOINT}/${dtb}" "${TMPDIR}"/
 if [ -n "${initrd}" ] ; then
 	cp "${MOUNTPOINT}/${initrd}" "${TMPDIR}"/
@@ -169,6 +181,9 @@ umount_dev
 # Create a temporary disk image using the provided image file as a backing
 # file, so that we don't modify the original image
 qemu-img create -f qcow2 -b "${image}" "${TMPDIR}/disk.qcow2" 8G
+
+# Determine the PARTUUID of the rootfs partition
+rootfs_uuid=$(partx -g -o UUID -n "${rootfs_num}" "${image}")
 
 # Assemble the qemu options
 qemu_opts=(
@@ -180,7 +195,7 @@ qemu_opts=(
 	"-drive" "file=${TMPDIR}/disk.qcow2,format=qcow2,if=sd"
 	"-kernel" "${TMPDIR}/${kernel}"
 	"-dtb" "${TMPDIR}/${dtb}"
-	"-append" "rw earlyprintk loglevel=8 console=ttyAMA0 root=/dev/mmcblk0p2 fsck.repair=yes rootwait"
+	"-append" "rw earlyprintk loglevel=8 console=ttyAMA0 root=PARTUUID=${rootfs_uuid} fsck.repair=yes rootwait"
 )
 
 if [ -n "${initrd}" ] ; then
