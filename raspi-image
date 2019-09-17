@@ -329,7 +329,7 @@ function config_boot()
 
 function config_os()
 {
-	local dev boot_num boot_uuid rootfs_num rootfs_uuid num
+	local dev boot_num boot_uuid rootfs_num rootfs_uuid scr num
 
 	IFS=':' read -r -a dev <<< "${1}"
 
@@ -359,7 +359,13 @@ function config_os()
 		   "${MOUNTPOINT}"/etc/fstab
 
 	# Inject the raspi-<foo> scripts
-	cp raspi-image raspi-reboot "${MOUNTPOINT}"/sbin/
+	for scr in raspi-image raspi-reboot ; do
+		if [ -f "${scr}" ] ; then
+			cp "${scr}" "${MOUNTPOINT}"/sbin/
+		elif command -v "scr" >/dev/null ; then
+			cp "$(command -v "${scr}")" "${MOUNTPOINT}"/sbin/
+		fi
+	done
 
 	umount_dev
 
