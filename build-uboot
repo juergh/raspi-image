@@ -11,7 +11,7 @@ function build_uboot()
 		rpi_2)
 			export CROSS_COMPILE=arm-linux-gnueabihf-
 			;;
-		rpi_3)
+		rpi_3|rpi_4)
 			export CROSS_COMPILE=aarch64-linux-gnu-
 			;;
 		*)
@@ -20,21 +20,28 @@ function build_uboot()
 	esac
 
 	make distclean
-	cp ../boot/"uboot_${model}_config" .config
+	make "${model}_defconfig"
+
+	sed -i '/CONFIG_CMD_BOOTMENU/d' .config
+	echo "CONFIG_CMD_BOOTMENU=y" >> .config
+
+	sed -i '/CONFIG_ENV_FAT_FILE/d' .config
+	echo "CONFIG_ENV_FAT_FILE=\"uboot_${model#rpi_}.env\"" >> .config
+
 	make -j"$(nproc --all)"
 	cp u-boot.bin ../boot/"uboot_${model#rpi_}.bin"
 }
 
-VERSION=v2019.07
-
 if ! [ -d u-boot ] ; then
-	git clone --branch "${VERSION}" git://git.denx.de/u-boot.git u-boot
+	git clone git://git.denx.de/u-boot.git u-boot
 	cd u-boot
 else
 	cd u-boot
 	git clean -xf
-	git checkout "${VERSION}"
+	git checkout master
+	git pull
 fi
 
 build_uboot rpi_2
 build_uboot rpi_3
+build_uboot rpi_4

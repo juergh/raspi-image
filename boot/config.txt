@@ -5,7 +5,11 @@ dtparam=spi=on
 [pi2]
 kernel=uboot_2.bin
 
+[pi3]
+kernel=uboot_3.bin
+
 [pi4]
+kernel=uboot_4.bin
 dtoverlay=vc4-fkms-v3d
 max_framebuffers=2
 
