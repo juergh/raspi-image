@@ -623,7 +623,7 @@ function usage()
 	trap - EXIT INT TERM HUP
 
 	cat <<EOF
-Usage: raspi-image [-d] [-h] [r] COMMAND [OPTIONS]
+Usage: raspi-image [-d] [-f] [-h] [-r] [-u] COMMAND [OPTIONS]
 
 Supported commands
   init DEVICE    Initialize the device DEVICE.
