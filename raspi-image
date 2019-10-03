@@ -487,8 +487,12 @@ EOF
 	# Clone the Raspberry Pi firmware repo
 	if ! [ -d rpi-firmware ] ; then
 		pr_info "Clonig the Raspberry firmware repo"
-		git clone --depth 1 \
-			https://github.com/raspberrypi/firmware.git rpi-firmware
+		git clone https://github.com/raspberrypi/firmware.git rpi-firmware
+	else
+		cd rpi-firmware
+		git clean -dxf
+		git pull
+		cd ..
 	fi
 
 	# Copy the boot files
